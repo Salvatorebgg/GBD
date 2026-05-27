@@ -80,7 +80,8 @@ standardize_gbd_data <- function(data) {
     lower = c("lower", "lower_ui", "lower_bound", "lo"),
     region = c("region", "region_name", "super_region_name"),
     sdi = c("sdi", "sdi_index", "sociodemographic_index"),
-    population = c("population", "pop", "population_m")
+    population = c("population", "pop", "population_m"),
+    source_file = c("source_file", ".source_file")
   )
 
   out <- data.frame(.row_id = seq_len(nrow(data)), stringsAsFactors = FALSE)
@@ -106,7 +107,8 @@ standardize_gbd_data <- function(data) {
     metric = "Rate",
     region = "Not specified",
     sdi = NA_real_,
-    population = NA_real_
+    population = NA_real_,
+    source_file = "Not specified"
   )
   for (field in names(defaults)) {
     if (!field %in% names(out)) out[[field]] <- rep(defaults[[field]], n)
@@ -121,7 +123,7 @@ standardize_gbd_data <- function(data) {
   out$sdi <- safe_numeric(out$sdi)
   out$population <- safe_numeric(out$population)
 
-  text_fields <- c("measure", "location", "sex", "age", "cause", "metric", "region")
+  text_fields <- c("measure", "location", "sex", "age", "cause", "metric", "region", "source_file")
   for (field in text_fields) out[[field]] <- trimws(as.character(out[[field]]))
   out <- out[is.finite(out$year) & is.finite(out$val), , drop = FALSE]
   out$.row_id <- NULL
@@ -129,11 +131,46 @@ standardize_gbd_data <- function(data) {
   out
 }
 
+is_supported_gbd_file <- function(name) {
+  tolower(tools::file_ext(name)) %in% c("csv", "tsv", "txt")
+}
+
 read_gbd_file <- function(path, name = basename(path)) {
   ext <- tolower(tools::file_ext(name))
-  if (ext %in% c("csv", "txt")) return(standardize_gbd_data(read_csv_smart(path)))
-  if (ext %in% c("tsv")) return(standardize_gbd_data(utils::read.delim(path, stringsAsFactors = FALSE, check.names = FALSE)))
-  stop("目前支持 IHME/GBD Results Tool 导出的 CSV/TSV 文件。")
+  if (ext == "zip") return(read_gbd_zip(path, name))
+  if (ext %in% c("csv", "txt")) {
+    out <- standardize_gbd_data(read_csv_smart(path))
+    out$source_file <- basename(name)
+    return(out)
+  }
+  if (ext %in% c("tsv")) {
+    out <- standardize_gbd_data(utils::read.delim(path, stringsAsFactors = FALSE, check.names = FALSE))
+    out$source_file <- basename(name)
+    return(out)
+  }
+  stop("目前支持 IHME/GBD Results Tool 导出的 CSV/TSV/TXT 文件，或包含这些文件的 ZIP 压缩包。")
+}
+
+read_gbd_files <- function(paths, names = basename(paths)) {
+  if (length(paths) == 0) stop("没有可读取的 GBD 文件。")
+  pieces <- lapply(seq_along(paths), function(i) read_gbd_file(paths[[i]], names[[i]]))
+  pieces <- pieces[vapply(pieces, nrow, integer(1)) > 0]
+  if (length(pieces) == 0) stop("上传文件中没有可分析记录。")
+  out <- do.call(rbind, pieces)
+  rownames(out) <- NULL
+  standardize_gbd_data(out)
+}
+
+read_gbd_zip <- function(path, name = basename(path)) {
+  listing <- utils::unzip(path, list = TRUE)
+  if (!nrow(listing)) stop("ZIP 压缩包为空。")
+  files <- listing$Name[!grepl("/$", listing$Name) & is_supported_gbd_file(listing$Name)]
+  if (length(files) == 0) stop("ZIP 中没有 CSV/TSV/TXT 数据文件。")
+  exdir <- tempfile("gbd_zip_")
+  dir.create(exdir, recursive = TRUE, showWarnings = FALSE)
+  extracted <- utils::unzip(path, files = files, exdir = exdir, junkpaths = FALSE)
+  labels <- paste0(basename(name), "::", basename(files))
+  read_gbd_files(extracted, labels)
 }
 
 read_gbd_url <- function(url) {
@@ -223,7 +260,7 @@ gbd_variable_template <- function() {
 
 gbd_field_summary <- function(data) {
   data <- standardize_gbd_data(data)
-  fields <- c("measure", "cause", "metric", "age", "sex", "location", "region")
+  fields <- c("measure", "cause", "metric", "age", "sex", "location", "region", "source_file")
   rows <- lapply(fields, function(field) {
     vals <- sort(unique(data[[field]]))
     data.frame(
@@ -239,6 +276,30 @@ gbd_field_summary <- function(data) {
                examples = paste0(min(data$year), "-", max(data$year)), stringsAsFactors = FALSE),
     out
   )
+  rownames(out) <- NULL
+  out
+}
+
+gbd_source_file_summary <- function(data) {
+  data <- standardize_gbd_data(data)
+  files <- sort(unique(data$source_file))
+  files <- files[nzchar(files)]
+  rows <- lapply(files, function(file) {
+    d <- data[data$source_file == file, , drop = FALSE]
+    causes <- sort(unique(d$cause))
+    metrics <- sort(unique(d$metric))
+    ages <- sort(unique(d$age))
+    data.frame(
+      source_file = file,
+      rows = nrow(d),
+      causes = paste(head(causes, 3), collapse = "; "),
+      metrics = paste(metrics, collapse = "; "),
+      ages = paste(head(ages, 3), collapse = "; "),
+      years = paste0(min(d$year), "-", max(d$year)),
+      stringsAsFactors = FALSE
+    )
+  })
+  out <- do.call(rbind, rows)
   rownames(out) <- NULL
   out
 }
@@ -323,12 +384,16 @@ default_selection <- function(data, field) {
     field,
     measure = c("Deaths", "DALYs", "Prevalence", "Incidence"),
     metric = c("Rate", "Number", "Percent"),
-    age = c("Age-standardized", "All ages"),
+    age = c("Age-standardized", "All ages", "All Ages"),
     sex = c("Both", "Male", "Female"),
     vals
   )
-  hit <- preferred[preferred %in% vals]
-  if (length(hit) > 0) hit[[1]] else vals[[1]]
+  vals_lower <- tolower(vals)
+  for (one in preferred) {
+    hit <- which(vals_lower == tolower(one))
+    if (length(hit) > 0) return(vals[[hit[[1]]]])
+  }
+  vals[[1]]
 }
 
 default_filter_combo <- function(data) {
@@ -350,11 +415,11 @@ default_filter_combo <- function(data) {
   }
   first <- data[1, , drop = FALSE]
   list(
-    measure = first$measure[[1]],
+    measure = default_selection(data, "measure"),
     cause = first$cause[[1]],
-    metric = first$metric[[1]],
-    age = first$age[[1]],
-    sex = first$sex[[1]]
+    metric = default_selection(data, "metric"),
+    age = default_selection(data, "age"),
+    sex = default_selection(data, "sex")
   )
 }
 

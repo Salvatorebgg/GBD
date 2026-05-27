@@ -73,13 +73,25 @@ draw_plot_message <- function(title, lines) {
 collapse_gbd_series <- function(data) {
   data <- standardize_gbd_data(data)
   key <- c("location", "year", "region")
-  grouped <- aggregate(
-    cbind(val, lower, upper, sdi, population) ~ location + year + region,
-    data = data,
-    FUN = function(x) mean(x, na.rm = TRUE)
+  sum_or_na <- function(x) {
+    x <- x[is.finite(x)]
+    if (length(x) == 0) NA_real_ else sum(x)
+  }
+  mean_or_na <- function(x) {
+    x <- x[is.finite(x)]
+    if (length(x) == 0) NA_real_ else mean(x)
+  }
+  burden <- aggregate(
+    data[c("val", "lower", "upper")],
+    by = data[key],
+    FUN = sum_or_na
   )
-  grouped$sdi[is.nan(grouped$sdi)] <- NA_real_
-  grouped$population[is.nan(grouped$population)] <- NA_real_
+  covars <- aggregate(
+    data[c("sdi", "population")],
+    by = data[key],
+    FUN = mean_or_na
+  )
+  grouped <- merge(burden, covars, by = key, all.x = TRUE, sort = FALSE)
   grouped <- grouped[order(grouped$location, grouped$year), , drop = FALSE]
   rownames(grouped) <- NULL
   grouped
@@ -134,7 +146,7 @@ trend_one_location <- function(d, start_year, end_year) {
 
 make_forecast <- function(series, horizon = 2030) {
   series <- series[is.finite(series$year) & is.finite(series$val) & series$val > 0, , drop = FALSE]
-  if (nrow(series) < 5) return(data.frame())
+  if (nrow(series) < 3 || length(unique(series$year)) < 3) return(data.frame())
   max_year <- max(series$year)
   future_years <- seq(max_year, horizon)
   fit <- stats::lm(log(val) ~ year, data = series)
@@ -147,6 +159,14 @@ make_forecast <- function(series, horizon = 2030) {
     type = ifelse(future_years <= max_year, "Observed", "Forecast"),
     stringsAsFactors = FALSE
   )
+}
+
+collapse_unique_terms <- function(x, max_n = 6) {
+  vals <- sort(unique(as.character(x)))
+  vals <- vals[nzchar(vals)]
+  if (length(vals) == 0) return("Not specified")
+  if (length(vals) <= max_n) return(paste(vals, collapse = "; "))
+  paste0(paste(head(vals, max_n), collapse = "; "), "; 等 ", length(vals), " 项")
 }
 
 filter_for_analysis <- function(data, measure = NULL, cause = NULL, metric = NULL, age = NULL, sex = NULL, locations = NULL) {
@@ -192,11 +212,11 @@ analyze_gbd <- function(data, measure = NULL, cause = NULL, metric = NULL, age =
   if (nrow(forecast) > 0) forecast$location <- focus_location
 
   meta <- list(
-    measure = paste(sort(unique(selected$measure)), collapse = "; "),
-    cause = paste(sort(unique(selected$cause)), collapse = "; "),
-    metric = paste(sort(unique(selected$metric)), collapse = "; "),
-    age = paste(sort(unique(selected$age)), collapse = "; "),
-    sex = paste(sort(unique(selected$sex)), collapse = "; "),
+    measure = collapse_unique_terms(selected$measure),
+    cause = collapse_unique_terms(selected$cause),
+    metric = collapse_unique_terms(selected$metric),
+    age = collapse_unique_terms(selected$age),
+    sex = collapse_unique_terms(selected$sex),
     start_year = start_year,
     end_year = end_year,
     focus_location = focus_location,
@@ -777,6 +797,7 @@ draw_quadrant_plot <- function(result, preview = FALSE) {
   }
   x_mid <- stats::median(d$latest_value, na.rm = TRUE)
   y_mid <- 0
+  d$plot_size <- ifelse(is.finite(d$population), d$population, 1)
   d$priority <- ifelse(d$latest_value >= x_mid & d$eapc > 0, "High burden + rising",
                        ifelse(d$latest_value >= x_mid, "High burden", ifelse(d$eapc > 0, "Rising", "Lower priority")))
   label_idx <- unique(c(
@@ -791,7 +812,7 @@ draw_quadrant_plot <- function(result, preview = FALSE) {
     ggplot2::annotate("rect", xmin = x_mid, xmax = Inf, ymin = 0, ymax = Inf, fill = "#FFF1E7", alpha = 0.75) +
     ggplot2::geom_hline(yintercept = y_mid, colour = "#B7C8C4", linewidth = 0.65, linetype = "22") +
     ggplot2::geom_vline(xintercept = x_mid, colour = "#B7C8C4", linewidth = 0.65, linetype = "22") +
-    ggplot2::geom_point(ggplot2::aes(fill = priority, size = pmax(population, 1)), shape = 21, colour = "#FFFFFF", stroke = 0.85, alpha = 0.92) +
+    ggplot2::geom_point(ggplot2::aes(fill = priority, size = plot_size), shape = 21, colour = "#FFFFFF", stroke = 0.85, alpha = 0.92) +
     {
       if (requireNamespace("ggrepel", quietly = TRUE)) {
         ggrepel::geom_text_repel(data = label_df, ggplot2::aes(label = location), family = plot_family(), size = if (preview) 2.55 else 3.05, colour = th$ink, segment.colour = "#A8B9B5", segment.size = 0.25, show.legend = FALSE)

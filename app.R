@@ -363,12 +363,13 @@ ui <- fluidPage(
                   div(class = "panel-section",
                       panel_head("01", "数据来源", "演示数据或上传文件"),
                       radioButtons("data_source", NULL,
-                          choices = c("上传 CSV" = "upload", "演示数据" = "demo"),
+                          choices = c("批量上传 CSV/ZIP" = "upload", "演示数据" = "demo"),
                           selected = "upload"),
                       conditionalPanel("input.data_source == 'upload'",
-                          fileInput("user_file", "上传 GBD CSV/TSV 文件",
-                              accept = c(".csv", ".tsv", ".txt"),
-                              buttonLabel = "浏览", placeholder = "未选择文件")),
+                          fileInput("user_file", "上传 GBD CSV/TSV/TXT 或 ZIP",
+                              multiple = TRUE,
+                              accept = c(".csv", ".tsv", ".txt", ".zip"),
+                              buttonLabel = "浏览", placeholder = "可一次选择多个 CSV，或上传一个 ZIP")),
                       conditionalPanel("input.data_source == 'url'",
                           textInput("gbd_url", "CSV URL", placeholder = "https://.../gbd_export.csv"),
                           actionButton("fetch_url", "获取 URL", class = "btn-generate")),
@@ -533,7 +534,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   raw_data <- reactiveVal(make_example_gbd())
   raw_label <- reactiveVal("内置演示数据")
-  upload_status <- reactiveVal(list(state = "success", message = "已加载演示数据。可直接查看结果，或上传 GBD CSV 文件。"))
+  upload_status <- reactiveVal(list(state = "success", message = "已加载演示数据。可直接查看结果，或批量上传 GBD CSV/ZIP 文件。"))
   upload_canceled <- reactiveVal(FALSE)
   analysis_error <- reactiveVal(NULL)
 
@@ -578,8 +579,10 @@ server <- function(input, output, session) {
   # ---- Update scope inputs ----
   update_scope_inputs <- function(data) {
     combo <- default_filter_combo(data)
+    cause_vals <- sort(unique(data$cause))
+    cause_selected <- if (length(cause_vals) > 1) "__ALL__" else combo$cause
     updateSelectizeInput(session, "measure", choices = available_choices(data, "measure", add_all = FALSE), selected = combo$measure, server = TRUE)
-    updateSelectizeInput(session, "cause", choices = available_choices(data, "cause", add_all = FALSE), selected = combo$cause, server = TRUE)
+    updateSelectizeInput(session, "cause", choices = available_choices(data, "cause", add_all = length(cause_vals) > 1), selected = cause_selected, server = TRUE)
     updateSelectizeInput(session, "metric", choices = available_choices(data, "metric", add_all = FALSE), selected = combo$metric, server = TRUE)
     updateSelectizeInput(session, "age", choices = available_choices(data, "age", add_all = FALSE), selected = combo$age, server = TRUE)
     updateSelectizeInput(session, "sex", choices = available_choices(data, "sex", add_all = FALSE), selected = combo$sex, server = TRUE)
@@ -614,13 +617,14 @@ server <- function(input, output, session) {
   observeEvent(input$user_file, {
     if (is.null(input$user_file)) return(invisible(NULL))
     tryCatch({
-      data <- read_gbd_file(input$user_file$datapath, input$user_file$name)
+      data <- read_gbd_files(input$user_file$datapath, input$user_file$name)
       raw_data(data)
-      raw_label(input$user_file$name)
+      source_n <- length(unique(data$source_file))
+      raw_label(if (source_n == 1) unique(data$source_file)[[1]] else paste0(source_n, " 个文件"))
       upload_canceled(FALSE)
       analysis_error(NULL)
-      upload_status(list(state = "success", message = paste0("已上传：", input$user_file$name, "；", nrow(data), " 行。已自动分析。")))
-      showNotification("上传成功，分析完成", type = "message", duration = 3)
+      upload_status(list(state = "success", message = paste0("已上传：", source_n, " 个数据文件；", format(nrow(data), big.mark = ","), " 行；", length(unique(data$cause)), " 个病因/风险因素。已自动分析。")))
+      showNotification("批量上传成功，分析完成", type = "message", duration = 3)
     }, error = function(err) {
       upload_status(list(state = "error", message = paste0("上传失败：", conditionMessage(err))))
       analysis_error(conditionMessage(err))
@@ -648,7 +652,7 @@ server <- function(input, output, session) {
   # ---- Cancel upload ----
   observeEvent(input$cancel_upload, {
     upload_canceled(TRUE)
-    upload_status(list(state = "cancel", message = "已取消上传。请选择演示数据或上传新的 CSV。"))
+    upload_status(list(state = "cancel", message = "已取消上传。请选择演示数据或上传新的 CSV/ZIP。"))
     session$sendCustomMessage("clearFileInput", "user_file")
     showNotification("已取消上传", type = "message", duration = 2)
   }, ignoreInit = TRUE)
@@ -736,11 +740,35 @@ server <- function(input, output, session) {
   output$file_inventory_ui <- renderUI({
     data <- raw_data()
     fields <- gbd_field_summary(data)
-    tags$table(class = "table shiny-table table-striped table-hover",
-        tags$thead(tags$tr(tags$th("字段"), tags$th("数量"), tags$th("示例"))),
-        tags$tbody(lapply(seq_len(nrow(fields)), function(i) {
-          tags$tr(tags$td(fields$field[[i]]), tags$td(fields$n[[i]]), tags$td(fields$examples[[i]]))
-        }))
+    files <- gbd_source_file_summary(data)
+    source_block <- NULL
+    if (nrow(files) > 1 || !identical(files$source_file[[1]], "Not specified")) {
+      source_block <- tagList(
+        div(class = "section-title", "批量文件清单"),
+        tags$table(class = "table shiny-table table-striped table-hover",
+            tags$thead(tags$tr(tags$th("文件"), tags$th("行数"), tags$th("病因/风险因素"), tags$th("度量"), tags$th("年龄"), tags$th("年份"))),
+            tags$tbody(lapply(seq_len(nrow(files)), function(i) {
+              tags$tr(
+                tags$td(files$source_file[[i]]),
+                tags$td(format(files$rows[[i]], big.mark = ",")),
+                tags$td(files$causes[[i]]),
+                tags$td(files$metrics[[i]]),
+                tags$td(files$ages[[i]]),
+                tags$td(files$years[[i]])
+              )
+            }))
+        ),
+        div(class = "section-title section-title-spaced", "字段摘要")
+      )
+    }
+    tagList(
+      source_block,
+      tags$table(class = "table shiny-table table-striped table-hover",
+          tags$thead(tags$tr(tags$th("字段"), tags$th("数量"), tags$th("示例"))),
+          tags$tbody(lapply(seq_len(nrow(fields)), function(i) {
+            tags$tr(tags$td(fields$field[[i]]), tags$td(fields$n[[i]]), tags$td(fields$examples[[i]]))
+          }))
+      )
     )
   })
 
