@@ -1,0 +1,132 @@
+/* ═══════════════════════════════════════════════════════════
+   Theme — GBD Database Workbench v3.0
+   Professional full-screen style (aligned with CDCWonder/CHARLS)
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* —— Primary palette —— */
+  --primary: #0d7377;
+  --primary-hover: #0a5e61;
+  --primary-light: #e8f4f3;
+  --primary-soft: #f2f9f8;
+
+  /* —— Ink / Text —— */
+  --ink: #1a2b32;
+  --ink-heading: #0f1e22;
+  --text: #2d4a54;
+  --text-muted: #6b8590;
+  --text-soft: #8d9da3;
+
+  /* —— Accent —— */
+  --accent-teal: #0d7377;
+  --accent-navy: #15343f;
+  --accent-orange: #e06830;
+  --accent-red: #c0616e;
+  --accent-amber: #c8922a;
+  --accent-violet: #665C9E;
+  --accent-mint: #55998b;
+
+  /* —— Background —— */
+  --bg-root: #f6faf8;
+  --bg-surface: #ffffff;
+  --bg-soft: #f7faf9;
+  --bg-warm: #fefaf6;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fafcfb;
+
+  /* —— Border —— */
+  --border: #e0ebe7;
+  --border-soft: rgba(224, 235, 231, 0.7);
+  --border-active: #b8cec7;
+  --border-focus: #0d7377;
+
+  /* —— States —— */
+  --success: #3d8b7e;
+  --success-bg: #edf6f4;
+  --warning: #c5741a;
+  --warning-bg: #fff8f0;
+  --error: #c0616e;
+  --error-bg: #fef5f4;
+  --info: #3d7aab;
+  --info-bg: #eef6fb;
+
+  /* —— Shadows —— */
+  --shadow-xs: 0 1px 4px rgba(30,60,50,0.04);
+  --shadow-sm: 0 2px 8px rgba(30,60,50,0.04);
+  --shadow-md: 0 4px 20px rgba(30,60,50,0.06);
+  --shadow-lg: 0 8px 32px rgba(30,60,50,0.08);
+  --shadow-xl: 0 16px 48px rgba(30,60,50,0.10);
+
+  /* —— Radius —— */
+  --radius-sm: 7px;
+  --radius: 10px;
+  --radius-md: 12px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 9999px;
+
+  /* —— Fonts —— */
+  --font: 'Noto Sans SC', 'Microsoft YaHei', -apple-system, sans-serif;
+  --font-display: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+
+  /* —— Motion —— */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --duration-fast: 0.15s;
+  --duration: 0.18s;
+  --duration-slow: 0.25s;
+}
+
+/* ── Reset ───────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  min-height: 100%;
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(160deg, #f8fcfa 0%, #f4f8f6 50%, #faf8f6 100%);
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--ink);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+
+/* ── Animations ──────────────────────────────────────────── */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ── Scrollbar ───────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.2); }
+
+/* ── Selection ───────────────────────────────────────────── */
+::selection { background: rgba(13,115,119,0.15); color: var(--ink); }

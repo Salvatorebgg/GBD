@@ -1,0 +1,15 @@
+Package: gbdClinicalWorkbench
+Type: Shiny
+Title: GBD 临床数据库挖掘、绘图与写作工作台
+Version: 3.0.0
+Authors@R: person("Clinical Tools", role = c("aut", "cre"))
+Description: 面向 IHME Global Burden of Disease 导出数据的全宽专业 Shiny 工作台：研究设计控制台、下载清单、自动清洗、EAPC 趋势分析、8 张以上出版级图表（360 dpi）和论文初稿生成。采用与 CDC Wonder Workbench、CHARLS Workbench 一致的 workbench-grid 布局。
+Encoding: UTF-8
+Depends: R (>= 4.2.0)
+Imports:
+    shiny,
+    htmltools,
+    jsonlite,
+    ggplot2,
+    scales,
+    ragg
