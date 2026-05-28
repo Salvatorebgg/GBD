@@ -138,7 +138,146 @@ ui <- fluidPage(
     tags$link(rel = "stylesheet", href = "css/gbd-theme.css?v=20260526-v3"),
     tags$link(rel = "stylesheet", href = "css/gbd-layout.css?v=20260526-v3"),
     tags$link(rel = "stylesheet", href = "css/gbd-components.css?v=20260526-v3"),
+    tags$style(HTML("
+      .gbd-busy-mask {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(247, 250, 248, 0.72);
+        backdrop-filter: blur(3px);
+      }
+      .gbd-busy-mask.is-visible { display: flex; }
+      .gbd-busy-card {
+        width: min(420px, calc(100vw - 40px));
+        padding: 26px 28px;
+        border: 1px solid #DCE8E3;
+        border-radius: 12px;
+        background: #FFFFFF;
+        box-shadow: 0 22px 60px rgba(20, 42, 46, 0.14);
+        text-align: left;
+      }
+      .gbd-busy-row {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+      }
+      .gbd-busy-spinner {
+        width: 42px;
+        height: 42px;
+        border-radius: 999px;
+        border: 4px solid #DCE8E3;
+        border-top-color: #0E7C7B;
+        animation: gbdSpin 0.9s linear infinite;
+        flex: 0 0 auto;
+      }
+      .gbd-busy-title {
+        margin: 0;
+        color: #142A2E;
+        font-size: 22px;
+        font-weight: 800;
+        letter-spacing: 0;
+      }
+      .gbd-busy-text {
+        margin: 6px 0 0;
+        color: #687C82;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .gbd-busy-dismiss {
+        margin-top: 14px;
+        border: 1px solid #DCE8E3;
+        border-radius: 8px;
+        background: #F7FAF8;
+        color: #142A2E;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 7px 12px;
+        cursor: pointer;
+      }
+      .gbd-busy-dismiss:hover { background: #EEF6F3; }
+      body.gbd-busy-active .btn-generate,
+      body.gbd-busy-active .download-btn,
+      body.gbd-busy-active .hero-action {
+        pointer-events: none;
+        opacity: 0.72;
+      }
+      @keyframes gbdSpin { to { transform: rotate(360deg); } }
+    ")),
     tags$script(HTML("
+      (function() {
+        var busyTimer = null;
+        var busyDelayTimer = null;
+        var busyHardTimer = null;
+        var minVisibleUntil = 0;
+        function mask() { return document.getElementById('gbd_busy_mask'); }
+        function showBusy(text, maxMs) {
+          var el = mask();
+          if (!el) return;
+          var body = document.body;
+          var msg = el.querySelector('[data-busy-message]');
+          if (msg && text) msg.textContent = text;
+          minVisibleUntil = Date.now() + 650;
+          window.clearTimeout(busyTimer);
+          window.clearTimeout(busyHardTimer);
+          el.classList.add('is-visible');
+          if (body) body.classList.add('gbd-busy-active');
+          busyHardTimer = window.setTimeout(function() {
+            hideBusy(true);
+          }, maxMs || 120000);
+        }
+        function showBusySoon(text, delayMs, maxMs) {
+          window.clearTimeout(busyDelayTimer);
+          busyDelayTimer = window.setTimeout(function() {
+            showBusy(text, maxMs);
+          }, delayMs || 650);
+        }
+        function hideBusy(force) {
+          window.clearTimeout(busyDelayTimer);
+          var wait = force ? 0 : Math.max(0, minVisibleUntil - Date.now());
+          window.clearTimeout(busyTimer);
+          busyTimer = window.setTimeout(function() {
+            var el = mask();
+            if (el) el.classList.remove('is-visible');
+            if (document.body) document.body.classList.remove('gbd-busy-active');
+            window.clearTimeout(busyHardTimer);
+          }, wait);
+        }
+        document.addEventListener('change', function(e) {
+          if (e.target && e.target.type === 'file' && e.target.files && e.target.files.length > 0) {
+            showBusy('正在上传并识别 GBD 文件；大文件、ZIP 或 TIF 可能需要更久，请不要重复点击。', 180000);
+          }
+        }, true);
+        document.addEventListener('click', function(e) {
+          if (e.target && e.target.closest && e.target.closest('[data-busy-dismiss]')) {
+            hideBusy(true);
+            return;
+          }
+          var target = e.target && e.target.closest ? e.target.closest('#run_analysis, .btn-generate, .hero-action') : null;
+          if (target) showBusy('分析中，请稍等。系统正在清洗、建模并生成图表。', 120000);
+        }, true);
+        document.addEventListener('shiny:busy', function() {
+          showBusySoon('分析中，请稍等。大型 GBD 文件正在读取、清洗或绘图。', 700, 120000);
+        });
+        document.addEventListener('shiny:idle', hideBusy);
+        function bindJqueryBusyEvents() {
+          if (!window.jQuery) {
+            window.setTimeout(bindJqueryBusyEvents, 200);
+            return;
+          }
+          window.jQuery(document)
+            .on('shiny:busy', function() {
+              showBusySoon('分析中，请稍等。大型 GBD 文件正在读取、清洗或绘图。', 700, 120000);
+            })
+            .on('shiny:idle', hideBusy);
+        }
+        bindJqueryBusyEvents();
+        window.gbdShowBusy = showBusy;
+        window.gbdHideBusy = hideBusy;
+      })();
+
       Shiny.addCustomMessageHandler('clearFileInput', function(id) {
         var root = document.getElementById(id);
         if (!root) return;
@@ -152,7 +291,32 @@ ui <- fluidPage(
         var name = root.querySelector('.form-control');
         if (name && name.value !== undefined) name.value = '';
       });
+      Shiny.addCustomMessageHandler('gbdBusy', function(message) {
+        if (message && message.show === false) {
+          if (window.gbdHideBusy) window.gbdHideBusy();
+        } else {
+          if (window.gbdShowBusy) window.gbdShowBusy((message && message.text) || '分析中，请稍等。', (message && message.maxMs) || 120000);
+        }
+      });
     "))
+  ),
+
+  div(
+    id = "gbd_busy_mask",
+    class = "gbd-busy-mask",
+    div(
+      class = "gbd-busy-card",
+      div(
+        class = "gbd-busy-row",
+        div(class = "gbd-busy-spinner"),
+        div(
+          h3(class = "gbd-busy-title", "分析中，请稍等"),
+          p(class = "gbd-busy-text", `data-busy-message` = TRUE,
+            "系统正在读取、清洗、建模并生成图表。大型 GBD 文件可能需要几十秒，请不要重复点击。"),
+          tags$button(type = "button", class = "gbd-busy-dismiss", `data-busy-dismiss` = TRUE, "隐藏提示")
+        )
+      )
+    )
   ),
 
   div(class = "app-shell",
@@ -366,10 +530,10 @@ ui <- fluidPage(
                           choices = c("批量上传 CSV/ZIP" = "upload", "演示数据" = "demo"),
                           selected = "upload"),
                       conditionalPanel("input.data_source == 'upload'",
-                          fileInput("user_file", "上传 GBD CSV/TSV/TXT 或 ZIP",
+                          fileInput("user_file", "上传 GBD CSV/TSV/TXT/XLSX/TIF/GZ 或 ZIP",
                               multiple = TRUE,
-                              accept = c(".csv", ".tsv", ".txt", ".zip"),
-                              buttonLabel = "浏览", placeholder = "可一次选择多个 CSV，或上传一个 ZIP")),
+                              accept = c(".csv", ".tsv", ".txt", ".xlsx", ".xls", ".tif", ".tiff", ".gz", ".zip"),
+                              buttonLabel = "浏览", placeholder = "可一次选择多个文件，或上传一个 ZIP")),
                       conditionalPanel("input.data_source == 'url'",
                           textInput("gbd_url", "CSV URL", placeholder = "https://.../gbd_export.csv"),
                           actionButton("fetch_url", "获取 URL", class = "btn-generate")),
@@ -534,7 +698,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   raw_data <- reactiveVal(make_example_gbd())
   raw_label <- reactiveVal("内置演示数据")
-  upload_status <- reactiveVal(list(state = "success", message = "已加载演示数据。可直接查看结果，或批量上传 GBD CSV/ZIP 文件。"))
+  upload_status <- reactiveVal(list(state = "success", message = "已加载演示数据。可直接查看结果，或批量上传 GBD CSV/XLSX/ZIP/TIF 文件。"))
   upload_canceled <- reactiveVal(FALSE)
   analysis_error <- reactiveVal(NULL)
 
@@ -580,13 +744,13 @@ server <- function(input, output, session) {
   update_scope_inputs <- function(data) {
     combo <- default_filter_combo(data)
     cause_vals <- sort(unique(data$cause))
-    cause_selected <- if (length(cause_vals) > 1) "__ALL__" else combo$cause
     updateSelectizeInput(session, "measure", choices = available_choices(data, "measure", add_all = FALSE), selected = combo$measure, server = TRUE)
-    updateSelectizeInput(session, "cause", choices = available_choices(data, "cause", add_all = length(cause_vals) > 1), selected = cause_selected, server = TRUE)
+    updateSelectizeInput(session, "cause", choices = available_choices(data, "cause", add_all = length(cause_vals) > 1), selected = combo$cause, server = TRUE)
     updateSelectizeInput(session, "metric", choices = available_choices(data, "metric", add_all = FALSE), selected = combo$metric, server = TRUE)
     updateSelectizeInput(session, "age", choices = available_choices(data, "age", add_all = FALSE), selected = combo$age, server = TRUE)
     updateSelectizeInput(session, "sex", choices = available_choices(data, "sex", add_all = FALSE), selected = combo$sex, server = TRUE)
-    locs <- sort(unique(data$location))
+    slice <- gbd_filter_data(data, measure = combo$measure, cause = combo$cause, metric = combo$metric, age = combo$age, sex = combo$sex)
+    locs <- sort(unique(slice$location))
     default_locs <- unique(c("Global", "China", "United States of America", "India", "Japan"))
     default_locs <- default_locs[default_locs %in% locs]
     if (length(default_locs) == 0) default_locs <- head(locs, 6)
@@ -594,12 +758,31 @@ server <- function(input, output, session) {
     focus <- if ("Global" %in% default_locs) "Global" else default_locs[[1]]
     updateSelectizeInput(session, "focus_location", choices = locs, selected = focus, server = TRUE)
     updateSliderInput(session, "year_range", min = min(data$year), max = max(data$year), value = c(min(data$year), max(data$year)))
-    updateNumericInput(session, "forecast_year", value = max(data$year) + 7, min = max(data$year) + 1)
+    updateNumericInput(session, "forecast_year", value = max(data$year) + 7, min = max(data$year) + 1, max = max(data$year) + 30)
   }
 
   observeEvent(raw_data(), {
     update_scope_inputs(raw_data())
   }, ignoreInit = FALSE)
+
+  observeEvent(list(input$measure, input$cause, input$metric, input$age, input$sex), {
+    data <- raw_data()
+    req(data)
+    slice <- try(gbd_filter_data(data, measure = input$measure, cause = input$cause, metric = input$metric, age = input$age, sex = input$sex), silent = TRUE)
+    if (inherits(slice, "try-error") || nrow(slice) == 0) return(invisible(NULL))
+    locs <- sort(unique(slice$location))
+    current <- input$locations %||% character(0)
+    selected <- current[current %in% locs]
+    if (length(selected) == 0) {
+      preferred <- unique(c("Global", "China", "United States of America", "India", "Japan"))
+      selected <- preferred[preferred %in% locs]
+      if (length(selected) == 0) selected <- head(locs, 6)
+    }
+    focus <- input$focus_location %||% if ("Global" %in% selected) "Global" else selected[[1]]
+    if (!focus %in% selected) focus <- if ("Global" %in% selected) "Global" else selected[[1]]
+    updateSelectizeInput(session, "locations", choices = locs, selected = selected, server = TRUE)
+    updateSelectizeInput(session, "focus_location", choices = locs, selected = focus, server = TRUE)
+  }, ignoreInit = TRUE)
 
   # ---- Data source switching ----
   observeEvent(input$data_source, {
@@ -618,12 +801,14 @@ server <- function(input, output, session) {
     if (is.null(input$user_file)) return(invisible(NULL))
     tryCatch({
       data <- read_gbd_files(input$user_file$datapath, input$user_file$name)
+      skipped <- length(attr(data, "gbd_import_errors") %||% character(0))
       raw_data(data)
       source_n <- length(unique(data$source_file))
       raw_label(if (source_n == 1) unique(data$source_file)[[1]] else paste0(source_n, " 个文件"))
       upload_canceled(FALSE)
       analysis_error(NULL)
-      upload_status(list(state = "success", message = paste0("已上传：", source_n, " 个数据文件；", format(nrow(data), big.mark = ","), " 行；", length(unique(data$cause)), " 个病因/风险因素。已自动分析。")))
+      skip_msg <- if (skipped > 0) paste0("；已跳过 ", skipped, " 个非结果/不可分析文件") else ""
+      upload_status(list(state = "success", message = paste0("已上传：", source_n, " 个数据文件；", format(nrow(data), big.mark = ","), " 行；", length(unique(data$cause)), " 个病因/风险因素", skip_msg, "。已自动分析。")))
       showNotification("批量上传成功，分析完成", type = "message", duration = 3)
     }, error = function(err) {
       upload_status(list(state = "error", message = paste0("上传失败：", conditionMessage(err))))
@@ -652,7 +837,7 @@ server <- function(input, output, session) {
   # ---- Cancel upload ----
   observeEvent(input$cancel_upload, {
     upload_canceled(TRUE)
-    upload_status(list(state = "cancel", message = "已取消上传。请选择演示数据或上传新的 CSV/ZIP。"))
+    upload_status(list(state = "cancel", message = "已取消上传。请选择演示数据或上传新的 CSV/XLSX/ZIP/TIF。"))
     session$sendCustomMessage("clearFileInput", "user_file")
     showNotification("已取消上传", type = "message", duration = 2)
   }, ignoreInit = TRUE)
@@ -661,14 +846,31 @@ server <- function(input, output, session) {
   scope_values <- reactive({
     data <- raw_data()
     combo <- default_filter_combo(data)
+    measure <- input$measure %||% combo$measure
+    cause <- input$cause %||% combo$cause
+    metric <- input$metric %||% combo$metric
+    age <- input$age %||% combo$age
+    sex <- input$sex %||% combo$sex
+    slice <- gbd_filter_data(data, measure = measure, cause = cause, metric = metric, age = age, sex = sex)
+    valid_locs <- sort(unique(slice$location))
+    if (length(valid_locs) == 0) valid_locs <- sort(unique(data$location))
+    selected_locs <- input$locations %||% head(valid_locs, 6)
+    selected_locs <- selected_locs[selected_locs %in% valid_locs]
+    if (length(selected_locs) == 0) {
+      preferred_locs <- unique(c("Global", "China", "United States of America", "India", "Japan"))
+      selected_locs <- preferred_locs[preferred_locs %in% valid_locs]
+      if (length(selected_locs) == 0) selected_locs <- head(valid_locs, 6)
+    }
+    focus <- input$focus_location %||% if ("Global" %in% valid_locs) "Global" else valid_locs[[1]]
+    if (!focus %in% selected_locs) focus <- if ("Global" %in% selected_locs) "Global" else selected_locs[[1]]
     list(
-      measure = input$measure %||% combo$measure,
-      cause = input$cause %||% combo$cause,
-      metric = input$metric %||% combo$metric,
-      age = input$age %||% combo$age,
-      sex = input$sex %||% combo$sex,
-      locations = input$locations %||% head(sort(unique(data$location)), 6),
-      focus_location = input$focus_location %||% if ("Global" %in% data$location) "Global" else sort(unique(data$location))[[1]],
+      measure = measure,
+      cause = cause,
+      metric = metric,
+      age = age,
+      sex = sex,
+      locations = selected_locs,
+      focus_location = focus,
       year_range = input$year_range %||% c(min(data$year), max(data$year)),
       forecast_year = input$forecast_year %||% (max(data$year) + 7)
     )
@@ -830,6 +1032,11 @@ server <- function(input, output, session) {
                     uiOutput("quality_metrics")
                 ),
                 div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("自动诊断"), span("数据类型、缺失维度与推荐策略")),
+                    div(class = "table-scroll", tableOutput("diagnostic_table")),
+                    br(), downloadButton("download_diagnostic", "下载诊断表 CSV", class = "download-btn")
+                ),
+                div(class = "analysis-section",
                     div(class = "analysis-section-head", h4("处理流程"), span("图 1")),
                     div(class = "plot-wrap plot-wrap-flow", plotOutput("flow_plot", height = "620px")),
                     br(), div(class = "table-scroll", tableOutput("flow_table_analysis")),
@@ -860,6 +1067,11 @@ server <- function(input, output, session) {
 
             tabPanel("图形",
                 div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("综合情报看板"), span("总览、排名、构成和解释信号")),
+                    div(class = "plot-wrap plot-wrap-flow", plotOutput("storyboard_plot", height = "720px")),
+                    br(), downloadButton("download_storyboard_plot", "下载综合看板 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
                     div(class = "analysis-section-head", h4("趋势图"), span("重点及高负担地区")),
                     div(class = "plot-wrap", plotOutput("trend_plot", height = "620px")),
                     br(), downloadButton("download_trend_plot", "下载趋势图 PNG", class = "download-btn")
@@ -880,14 +1092,54 @@ server <- function(input, output, session) {
                     br(), downloadButton("download_uncertainty_plot", "下载 UI 图 PNG", class = "download-btn")
                 ),
                 div(class = "analysis-section",
-                    div(class = "analysis-section-head", h4("SDI 梯度"), span("仅做生态学描述")),
+                    div(class = "analysis-section-head", h4("不确定性扇形"), span("焦点地区 UI 随时间变化")),
+                    div(class = "plot-wrap", plotOutput("uncertainty_fan_plot", height = "620px")),
+                    br(), downloadButton("download_uncertainty_fan_plot", "下载扇形图 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("构成贡献"), span("病因/年龄/文件来源贡献")),
+                    div(class = "plot-wrap", plotOutput("contribution_plot", height = "640px")),
+                    br(), downloadButton("download_contribution_plot", "下载构成图 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("构成流图"), span("结构随时间变化")),
+                    div(class = "plot-wrap", plotOutput("share_stream_plot", height = "640px")),
+                    br(), downloadButton("download_share_stream_plot", "下载构成流图 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("年龄谱"), span("最新年份年龄分层")),
+                    div(class = "plot-wrap", plotOutput("age_pattern_plot", height = "640px")),
+                    br(), downloadButton("download_age_pattern_plot", "下载年龄谱 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("SDI / 地区梯度"), span("缺 SDI 时自动替代")),
                     div(class = "plot-wrap", plotOutput("equity_plot", height = "620px")),
-                    br(), downloadButton("download_equity_plot", "下载 SDI 图 PNG", class = "download-btn")
+                    br(), downloadButton("download_equity_plot", "下载梯度图 PNG", class = "download-btn")
                 ),
                 div(class = "analysis-section",
                     div(class = "analysis-section-head", h4("负担-趋势象限图"), span("高负担 + 上升 = 优先关注")),
                     div(class = "plot-wrap", plotOutput("quadrant_plot", height = "620px")),
                     br(), downloadButton("download_quadrant_plot", "下载象限图 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("变化瀑布图"), span("起止年份变化贡献")),
+                    div(class = "plot-wrap", plotOutput("waterfall_plot", height = "640px")),
+                    br(), downloadButton("download_waterfall_plot", "下载瀑布图 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("排名迁移图"), span("高负担地区排序变化")),
+                    div(class = "plot-wrap", plotOutput("bump_rank_plot", height = "640px")),
+                    br(), downloadButton("download_bump_rank_plot", "下载排名迁移 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("地区小多图"), span("多地区轨迹矩阵")),
+                    div(class = "plot-wrap", plotOutput("small_multiples_plot", height = "760px")),
+                    br(), downloadButton("download_small_multiples_plot", "下载小多图 PNG", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("地区分布演变"), span("离散度与异常高值")),
+                    div(class = "plot-wrap", plotOutput("distribution_plot", height = "620px")),
+                    br(), downloadButton("download_distribution_plot", "下载分布图 PNG", class = "download-btn")
                 ),
                 div(class = "analysis-section",
                     div(class = "analysis-section-head", h4("近期预测"), span("探索性趋势外推")),
@@ -897,6 +1149,21 @@ server <- function(input, output, session) {
             ),
 
             tabPanel("扩展",
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("优先级表"), span("高负担、上升趋势与解释动作")),
+                    div(class = "table-scroll", tableOutput("priority_table")),
+                    br(), downloadButton("download_priority", "下载优先级 CSV", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("构成贡献表"), span("谁贡献了最新负担")),
+                    div(class = "table-scroll", tableOutput("contribution_table")),
+                    br(), downloadButton("download_contribution", "下载构成贡献 CSV", class = "download-btn")
+                ),
+                div(class = "analysis-section",
+                    div(class = "analysis-section-head", h4("年龄分层表"), span("最新年份年龄谱")),
+                    div(class = "table-scroll", tableOutput("age_pattern_table")),
+                    br(), downloadButton("download_age_pattern", "下载年龄谱 CSV", class = "download-btn")
+                ),
                 div(class = "analysis-section",
                     div(class = "analysis-section-head", h4("敏感性分析"), span("用于稳健性声明")),
                     div(class = "table-scroll", tableOutput("sensitivity_table")),
@@ -924,18 +1191,31 @@ server <- function(input, output, session) {
   output$flow_table_analysis <- compact_table(gbd_flow_table(result()))
   output$table1 <- compact_table(gbd_table1(result()))
   output$model_table <- compact_table(gbd_model_table(result()))
+  output$diagnostic_table <- compact_table(result()$diagnostic_table)
+  output$priority_table <- compact_table(result()$priority_table)
+  output$contribution_table <- compact_table(result()$contribution_table)
+  output$age_pattern_table <- compact_table(result()$age_pattern_table)
   output$sensitivity_table <- compact_table(gbd_sensitivity_table(result()))
   output$rank_table <- compact_table(result()$rank_table)
 
   # ---- Plot outputs ----
   output$flow_plot <- renderPlot(draw_gbd_flow_plot(result()), res = 110, execOnResize = TRUE)
+  output$storyboard_plot <- renderPlot(draw_storyboard_plot(result(), preview = TRUE), res = 110, execOnResize = TRUE)
   output$trend_plot <- renderPlot(draw_trend_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$rank_plot <- renderPlot(draw_rank_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$heatmap_plot <- renderPlot(draw_heatmap_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$eapc_plot <- renderPlot(draw_eapc_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$uncertainty_plot <- renderPlot(draw_uncertainty_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$uncertainty_fan_plot <- renderPlot(draw_uncertainty_fan_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$contribution_plot <- renderPlot(draw_contribution_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$share_stream_plot <- renderPlot(draw_share_stream_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$age_pattern_plot <- renderPlot(draw_age_pattern_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$equity_plot <- renderPlot(draw_equity_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$quadrant_plot <- renderPlot(draw_quadrant_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$waterfall_plot <- renderPlot(draw_waterfall_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$bump_rank_plot <- renderPlot(draw_bump_rank_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$small_multiples_plot <- renderPlot(draw_small_multiples_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
+  output$distribution_plot <- renderPlot(draw_distribution_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
   output$forecast_plot <- renderPlot(draw_forecast_plot(result(), preview = TRUE), res = 96, execOnResize = TRUE)
 
   # ---- Interpretation ----
@@ -1006,6 +1286,22 @@ server <- function(input, output, session) {
     filename = function() "gbd_eapc_model_table.csv",
     content = function(file) write_csv_excel(gbd_model_table(result()), file)
   )
+  output$download_diagnostic <- downloadHandler(
+    filename = function() "gbd_auto_diagnostic_table.csv",
+    content = function(file) write_csv_excel(result()$diagnostic_table, file)
+  )
+  output$download_priority <- downloadHandler(
+    filename = function() "gbd_priority_table.csv",
+    content = function(file) write_csv_excel(result()$priority_table, file)
+  )
+  output$download_contribution <- downloadHandler(
+    filename = function() "gbd_contribution_table.csv",
+    content = function(file) write_csv_excel(result()$contribution_table, file)
+  )
+  output$download_age_pattern <- downloadHandler(
+    filename = function() "gbd_age_pattern_table.csv",
+    content = function(file) write_csv_excel(result()$age_pattern_table, file)
+  )
   output$download_sensitivity <- downloadHandler(
     filename = function() "gbd_sensitivity_table.csv",
     content = function(file) write_csv_excel(gbd_sensitivity_table(result()), file)
@@ -1048,13 +1344,22 @@ server <- function(input, output, session) {
   }
 
   output$download_flow <- make_fig_handler(draw_gbd_flow_plot, 3600, 2500)
+  output$download_storyboard_plot <- make_fig_handler(draw_storyboard_plot, 4200, 2800)
   output$download_trend_plot <- make_fig_handler(draw_trend_plot, 3900, 2500)
   output$download_rank_plot <- make_fig_handler(draw_rank_plot, 3800, 2700)
   output$download_heatmap_plot <- make_fig_handler(draw_heatmap_plot, 3900, 2600)
   output$download_eapc_plot <- make_fig_handler(draw_eapc_plot, 3800, 2800)
   output$download_uncertainty_plot <- make_fig_handler(draw_uncertainty_plot, 3900, 2800)
+  output$download_uncertainty_fan_plot <- make_fig_handler(draw_uncertainty_fan_plot, 3900, 2600)
+  output$download_contribution_plot <- make_fig_handler(draw_contribution_plot, 3900, 2800)
+  output$download_share_stream_plot <- make_fig_handler(draw_share_stream_plot, 3900, 2800)
+  output$download_age_pattern_plot <- make_fig_handler(draw_age_pattern_plot, 3900, 2800)
   output$download_equity_plot <- make_fig_handler(draw_equity_plot, 3700, 2600)
   output$download_quadrant_plot <- make_fig_handler(draw_quadrant_plot, 3700, 2600)
+  output$download_waterfall_plot <- make_fig_handler(draw_waterfall_plot, 3900, 2800)
+  output$download_bump_rank_plot <- make_fig_handler(draw_bump_rank_plot, 3900, 2800)
+  output$download_small_multiples_plot <- make_fig_handler(draw_small_multiples_plot, 4200, 3200)
+  output$download_distribution_plot <- make_fig_handler(draw_distribution_plot, 3900, 2600)
   output$download_forecast_plot <- make_fig_handler(draw_forecast_plot, 3700, 2400)
 }
 

@@ -84,6 +84,43 @@ multi_result <- analyze_gbd(
 stopifnot(nrow(multi_result$selected) == 12)
 stopifnot(nrow(multi_result$series) == 6)
 stopifnot(nrow(gbd_source_file_summary(multi_public)) == 2)
+stopifnot(nrow(multi_result$diagnostic_table) >= 5)
+stopifnot(nrow(multi_result$priority_table) >= 1)
+stopifnot(nrow(multi_result$contribution_table) >= 1)
+
+bad_csv <- tempfile(fileext = ".csv")
+utils::write.csv(data.frame(code = 1:2, label = c("not", "estimate")), bad_csv, row.names = FALSE)
+mixed_zip <- tempfile(fileext = ".zip")
+ok <- try(utils::zip(mixed_zip, c(tmp_a, bad_csv), flags = "-j"), silent = TRUE)
+if (!inherits(ok, "try-error") && file.exists(mixed_zip)) {
+  mixed <- read_gbd_file(mixed_zip, "mixed_gbd_download.zip")
+  stopifnot(nrow(mixed) == nrow(minimal_public))
+  stopifnot(length(attr(mixed, "gbd_import_errors") %||% character(0)) >= 1)
+}
+
+gz_csv <- tempfile(fileext = ".csv.gz")
+con <- gzfile(gz_csv, open = "wt")
+utils::write.csv(minimal_public, con, row.names = FALSE)
+close(con)
+gz_data <- read_gbd_file(gz_csv, "gbd_export.csv.gz")
+stopifnot(nrow(gz_data) == nrow(minimal_public))
+
+location_id_public <- minimal_public
+location_id_public$location_name <- NULL
+location_id_public$location_id <- rep(c(1, 6), length.out = nrow(location_id_public))
+location_id_clean <- standardize_gbd_data(location_id_public)
+stopifnot(all(grepl("^Location ID ", unique(location_id_clean$location))))
+
+if (requireNamespace("terra", quietly = TRUE)) {
+  r <- terra::rast(nrows = 4, ncols = 4, xmin = -1, xmax = 1, ymin = -1, ymax = 1)
+  terra::values(r) <- seq_len(terra::ncell(r))
+  tif <- tempfile(pattern = "IHME_GBD_2023_AIR_POLLUTION_1990_2023_PM_2020_", fileext = ".tif")
+  terra::writeRaster(r, tif, overwrite = TRUE)
+  tif_data <- read_gbd_file(tif, basename(tif))
+  stopifnot(nrow(tif_data) == 1)
+  stopifnot(tif_data$year[[1]] == 2020)
+  stopifnot(tif_data$data_type[[1]] == "GeoTIFF raster summary")
+}
 
 tmp <- tempfile(fileext = ".png")
 open_plot_device(tmp, width = 1200, height = 800, res = 120)
@@ -92,10 +129,20 @@ dev.off()
 stopifnot(file.exists(tmp), file.info(tmp)$size > 1000)
 
 plot_checks <- list(
+  storyboard = draw_storyboard_plot,
   heatmap = draw_heatmap_plot,
   eapc = draw_eapc_plot,
   uncertainty = draw_uncertainty_plot,
-  quadrant = draw_quadrant_plot
+  uncertainty_fan = draw_uncertainty_fan_plot,
+  contribution = draw_contribution_plot,
+  share_stream = draw_share_stream_plot,
+  age_pattern = draw_age_pattern_plot,
+  equity = draw_equity_plot,
+  quadrant = draw_quadrant_plot,
+  waterfall = draw_waterfall_plot,
+  bump_rank = draw_bump_rank_plot,
+  small_multiples = draw_small_multiples_plot,
+  distribution = draw_distribution_plot
 )
 
 for (plot_name in names(plot_checks)) {

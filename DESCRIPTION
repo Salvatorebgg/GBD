@@ -12,4 +12,7 @@ Imports:
     jsonlite,
     ggplot2,
     scales,
-    ragg
+    ragg,
+    readxl
+Suggests:
+    terra

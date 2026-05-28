@@ -186,7 +186,7 @@ analyze_gbd <- function(data, measure = NULL, cause = NULL, metric = NULL, age =
   end_year <- end_year %||% max(series$year, na.rm = TRUE)
   start_year <- max(start_year, min(series$year, na.rm = TRUE))
   end_year <- min(end_year, max(series$year, na.rm = TRUE))
-  if (start_year >= end_year) stop("开始年份必须早于结束年份。")
+  if (start_year > end_year) stop("开始年份不能晚于结束年份。")
 
   by_location <- split(series, series$location)
   trend_rows <- lapply(by_location, trend_one_location, start_year = start_year, end_year = end_year)
@@ -217,11 +217,14 @@ analyze_gbd <- function(data, measure = NULL, cause = NULL, metric = NULL, age =
     metric = collapse_unique_terms(selected$metric),
     age = collapse_unique_terms(selected$age),
     sex = collapse_unique_terms(selected$sex),
+    data_type = collapse_unique_terms(selected$data_type),
     start_year = start_year,
     end_year = end_year,
     focus_location = focus_location,
     n_rows = nrow(selected),
     n_locations = length(unique(selected$location)),
+    n_causes = length(unique(selected$cause)),
+    n_measures = length(unique(selected$measure)),
     year_range = paste0(min(selected$year), "-", max(selected$year))
   )
   qa_table <- data.frame(
@@ -241,6 +244,10 @@ analyze_gbd <- function(data, measure = NULL, cause = NULL, metric = NULL, age =
     meta = meta,
     qa_table = qa_table
   )
+  out$diagnostic_table <- gbd_diagnostic_table(out)
+  out$priority_table <- gbd_priority_table(out)
+  out$contribution_table <- gbd_contribution_table(out)
+  out$age_pattern_table <- gbd_age_pattern_table(out)
   out$insights <- gbd_insights(out)
   out$paper <- gbd_paper_template(out)
   out
@@ -250,17 +257,24 @@ gbd_insights <- function(result) {
   t <- result$trend_table
   focus <- t[t$location == result$meta$focus_location, , drop = FALSE]
   if (nrow(focus) == 0) focus <- t[1, , drop = FALSE]
-  fastest_up <- t[which.max(t$eapc), , drop = FALSE]
-  fastest_down <- t[which.min(t$eapc), , drop = FALSE]
+  trend_signal <- ifelse(is.finite(t$eapc), t$eapc, ifelse(is.finite(t$percent_change), 100 * t$percent_change, NA_real_))
+  if (all(!is.finite(trend_signal))) trend_signal <- rep(0, nrow(t))
+  fastest_up <- t[which.max(trend_signal), , drop = FALSE]
+  fastest_down <- t[which.min(trend_signal), , drop = FALSE]
   highest <- t[1, , drop = FALSE]
-  direction <- ifelse(focus$eapc >= 0, "上升", "下降")
+  focus_signal <- ifelse(is.finite(focus$eapc), focus$eapc, ifelse(is.finite(focus$percent_change), 100 * focus$percent_change, 0))
+  direction <- ifelse(focus_signal >= 0, "上升", "下降")
+  trend_text <- if (is.finite(focus$eapc)) {
+    paste0("EAPC 为 ", fmt_num(focus$eapc, 2), "%/年")
+  } else {
+    paste0("起止相对变化为 ", fmt_pct(focus$percent_change))
+  }
   c(
     paste0(result$meta$focus_location, " 在 ", focus$start_year, "-", focus$end_year,
-           " 年间的 EAPC 为 ", fmt_num(focus$eapc, 2), "%/年，趋势总体", direction, "。"),
+           " 年间的 ", trend_text, "，趋势总体", direction, "。"),
     paste0("最新年份负担最高的地区为 ", highest$location, "，估计值为 ", fmt_num(highest$latest_value, 1),
            "（UI ", highest$uncertainty_interval, "）。"),
-    paste0("上升最快：", fastest_up$location, "（EAPC ", fmt_num(fastest_up$eapc, 2), "%/年）；下降最快：",
-           fastest_down$location, "（EAPC ", fmt_num(fastest_down$eapc, 2), "%/年）。")
+    paste0("变化信号最高：", fastest_up$location, "；变化信号最低：", fastest_down$location, "。")
   )
 }
 
@@ -388,6 +402,7 @@ gbd_flow_table <- function(result) {
 gbd_table1 <- function(result) {
   t <- result$trend_table
   if (nrow(t) == 0) return(data.frame())
+  trend_signal <- ifelse(is.finite(t$eapc), t$eapc, ifelse(is.finite(t$percent_change), 100 * t$percent_change, 0))
   data.frame(
     指标 = c("分析记录数", "地区数", "起止年份", "焦点地区", "焦点地区最新估计", "焦点地区 EAPC", "最新负担最高地区", "上升最快地区", "下降最快地区"),
     内容 = c(
@@ -403,11 +418,11 @@ gbd_table1 <- function(result) {
       {
         f <- t[t$location == result$meta$focus_location, , drop = FALSE]
         if (nrow(f) == 0) f <- t[1, , drop = FALSE]
-        paste0(fmt_num(f$eapc, 2), "%/年 (", fmt_num(f$eapc_low, 2), ", ", fmt_num(f$eapc_high, 2), ")")
+        if (is.finite(f$eapc)) paste0(fmt_num(f$eapc, 2), "%/年 (", fmt_num(f$eapc_low, 2), ", ", fmt_num(f$eapc_high, 2), ")") else "年份不足，未拟合 EAPC"
       },
       t$location[[which.max(t$latest_value)]],
-      t$location[[which.max(t$eapc)]],
-      t$location[[which.min(t$eapc)]]
+      t$location[[which.max(trend_signal)]],
+      t$location[[which.min(trend_signal)]]
     ),
     stringsAsFactors = FALSE
   )
@@ -446,6 +461,132 @@ gbd_sensitivity_table <- function(result) {
     ),
     stringsAsFactors = FALSE
   )
+}
+
+gbd_diagnostic_table <- function(result) {
+  s <- result$selected
+  finite_sdi <- sum(is.finite(s$sdi))
+  finite_pop <- sum(is.finite(s$population))
+  years <- sort(unique(s$year))
+  data.frame(
+    item = c("数据类型", "分析记录", "文件来源", "年份结构", "核心维度", "SDI 可用性", "人口权重", "趋势模型", "自动策略"),
+    value = c(
+      result$meta$data_type,
+      format(nrow(s), big.mark = ","),
+      paste0(length(unique(s$source_file)), " 个文件"),
+      paste0(min(years), "-", max(years), "；", length(years), " 个年份"),
+      paste0(result$meta$n_causes, " 个 cause/risk；", result$meta$n_locations, " 个地区"),
+      if (finite_sdi > 0) paste0("可用：", format(finite_sdi, big.mark = ","), " 行") else "缺失",
+      if (finite_pop > 0) paste0("可用：", format(finite_pop, big.mark = ","), " 行") else "缺失",
+      if (length(years) >= 3) "可计算 EAPC" else "年份不足，仅做描述性比较",
+      if (finite_sdi > 0) "使用真实 SDI 梯度" else "使用地区负担分位/排序作为替代梯度，图注中标明"
+    ),
+    note = c(
+      "由字段和文件类型自动识别。",
+      "进入当前筛选条件后的记录数。",
+      "批量上传时保留 source_file 便于回溯。",
+      "Forecast 文件会保留未来年份，历史文件保留原始年份。",
+      "决定是否适合做构成、地区差异和趋势比较。",
+      "多数 GHDx 公共 CSV 不自带 SDI，不能因此让图空白。",
+      "缺失时气泡图使用统一点大小。",
+      "EAPC 至少需要 3 个有效年份。",
+      "保证所有上传类型都有可解释输出。"
+    ),
+    stringsAsFactors = FALSE
+  )
+}
+
+gbd_priority_table <- function(result) {
+  d <- result$trend_table
+  if (nrow(d) == 0) return(data.frame())
+  latest_rank <- rank(-d$latest_value, ties.method = "average")
+  burden_pct <- 1 - (latest_rank - 1) / max(1, nrow(d) - 1)
+  trend_signal <- ifelse(is.finite(d$eapc), d$eapc, ifelse(is.finite(d$percent_change), 100 * d$percent_change, 0))
+  trend_pct <- if (length(unique(trend_signal[is.finite(trend_signal)])) > 1) {
+    rank(trend_signal, ties.method = "average") / nrow(d)
+  } else {
+    rep(0.5, nrow(d))
+  }
+  score <- 100 * (0.62 * burden_pct + 0.38 * trend_pct)
+  action <- ifelse(burden_pct >= 0.66 & trend_signal > 0, "优先关注：高负担且上升",
+                   ifelse(burden_pct >= 0.66, "重点描述：高负担",
+                          ifelse(trend_signal > 0, "预警观察：低负担但上升", "常规报告")))
+  out <- data.frame(
+    location = d$location,
+    latest_value = d$latest_value,
+    uncertainty_interval = d$uncertainty_interval,
+    percent_change = d$percent_change,
+    eapc = d$eapc,
+    priority_score = score,
+    action = action,
+    stringsAsFactors = FALSE
+  )
+  out <- out[order(-out$priority_score), , drop = FALSE]
+  out$latest_value <- fmt_num(out$latest_value, 2)
+  out$percent_change <- fmt_pct(out$percent_change)
+  out$eapc <- fmt_num(out$eapc, 2)
+  out$priority_score <- fmt_num(out$priority_score, 1)
+  rownames(out) <- NULL
+  out
+}
+
+gbd_contribution_table <- function(result) {
+  s <- result$selected
+  latest <- max(s$year, na.rm = TRUE)
+  focus <- result$meta$focus_location
+  d_all <- s[s$year == latest, , drop = FALSE]
+  d_focus <- d_all
+  if (focus %in% d_all$location) d_focus <- d_all[d_all$location == focus, , drop = FALSE]
+  if (length(unique(d_focus$cause)) > 1) {
+    d <- d_focus
+    dimension <- "cause"
+    location_label <- focus
+  } else if (length(unique(d_focus$age)) > 1) {
+    d <- d_focus
+    dimension <- "age"
+    location_label <- focus
+  } else if (length(unique(d_focus$measure)) > 1) {
+    d <- d_focus
+    dimension <- "measure"
+    location_label <- focus
+  } else if (length(unique(d_focus$sex)) > 1) {
+    d <- d_focus
+    dimension <- "sex"
+    location_label <- focus
+  } else if (length(unique(d_all$location)) > 1) {
+    d <- d_all
+    dimension <- "location"
+    location_label <- "Selected locations"
+  } else {
+    d <- d_focus
+    dimension <- "source_file"
+    location_label <- focus
+  }
+  grouped <- aggregate(d[c("val", "lower", "upper")], by = list(component = d[[dimension]]), FUN = function(x) sum(x[is.finite(x)], na.rm = TRUE))
+  grouped <- grouped[order(-grouped$val), , drop = FALSE]
+  total <- sum(grouped$val, na.rm = TRUE)
+  grouped$share <- if (is.finite(total) && total > 0) grouped$val / total else NA_real_
+  grouped$dimension <- dimension
+  grouped$year <- latest
+  grouped$location <- location_label
+  grouped <- grouped[, c("dimension", "component", "location", "year", "val", "share", "lower", "upper"), drop = FALSE]
+  rownames(grouped) <- NULL
+  grouped
+}
+
+gbd_age_pattern_table <- function(result) {
+  s <- result$selected
+  latest <- max(s$year, na.rm = TRUE)
+  focus <- result$meta$focus_location
+  d <- s[s$year == latest, , drop = FALSE]
+  if (focus %in% d$location) d <- d[d$location == focus, , drop = FALSE]
+  grouped <- aggregate(d[c("val", "lower", "upper")], by = list(age = d$age), FUN = function(x) sum(x[is.finite(x)], na.rm = TRUE))
+  grouped <- grouped[order(-grouped$val), , drop = FALSE]
+  grouped$year <- latest
+  grouped$location <- if (focus %in% s$location) focus else "All selected locations"
+  grouped <- grouped[, c("age", "location", "year", "val", "lower", "upper"), drop = FALSE]
+  rownames(grouped) <- NULL
+  grouped
 }
 
 gbd_interpretation_lines <- function(result) {
@@ -591,18 +732,40 @@ draw_equity_plot <- function(result, preview = FALSE) {
     return(invisible(NULL))
   }
   d <- result$trend_table
-  d <- d[is.finite(d$sdi) & is.finite(d$latest_value), , drop = FALSE]
-  if (nrow(d) < 3) {
-    draw_plot_message("无法生成 SDI 图", c("当前数据缺少 sdi 或地区数量不足。上传含 sdi/region 的文件可生成这张图。"))
+  d <- d[is.finite(d$latest_value), , drop = FALSE]
+  if (nrow(d) == 0) {
+    draw_plot_message("梯度图未生成", c("当前筛选没有可用于比较的估计值。"))
     return(invisible(NULL))
   }
-  d$pop_size <- ifelse(is.finite(d$population), d$population, stats::median(d$population, na.rm = TRUE))
+  has_sdi <- sum(is.finite(d$sdi)) >= 2
+  if (has_sdi) {
+    d$gradient_x <- d$sdi
+    x_lab <- "Socio-demographic Index (SDI)"
+    title <- if (preview) "SDI 梯度" else "SDI 梯度与当前负担"
+    subtitle <- paste0(result$meta$end_year, " 年估计值；点大小反映人口，缺失人口时使用统一大小。")
+    caption <- "生态学描述视角，不能解释为个体层面因果关系。"
+  } else {
+    d <- d[order(d$latest_value), , drop = FALSE]
+    d$gradient_x <- seq_len(nrow(d))
+    x_lab <- "地区负担排序（SDI 缺失时的替代梯度）"
+    title <- if (preview) "地区梯度" else "无 SDI 时的地区负担梯度"
+    subtitle <- paste0(result$meta$end_year, " 年估计值；源文件无 SDI，横轴改用负担从低到高排序。")
+    caption <- "源文件未提供 SDI，因此本图不声称社会发展梯度，只用于展示地区差异。"
+  }
+  pop_med <- stats::median(d$population[is.finite(d$population)], na.rm = TRUE)
+  if (!is.finite(pop_med)) pop_med <- 1
+  d$pop_size <- ifelse(is.finite(d$population), d$population, pop_med)
   label_idx <- unique(c(order(-d$latest_value)[seq_len(min(4, nrow(d)))], which(d$location == result$meta$focus_location)))
   label_df <- d[label_idx, , drop = FALSE]
   th <- clinical_theme()
   base_size <- if (preview) 11 else 14
-  p <- ggplot2::ggplot(d, ggplot2::aes(sdi, latest_value)) +
-    ggplot2::geom_smooth(method = "lm", se = TRUE, colour = th$navy, fill = "#D7E6EF", linewidth = 1.05, alpha = 0.48) +
+  smooth_layer <- if (nrow(d) >= 3 && length(unique(d$gradient_x)) >= 3) {
+    ggplot2::geom_smooth(method = "lm", se = TRUE, colour = th$navy, fill = "#D7E6EF", linewidth = 1.05, alpha = 0.42)
+  } else {
+    NULL
+  }
+  p <- ggplot2::ggplot(d, ggplot2::aes(gradient_x, latest_value)) +
+    smooth_layer +
     ggplot2::geom_point(ggplot2::aes(fill = region, size = pop_size), shape = 21, colour = "#FFFFFF", stroke = 0.9, alpha = 0.94) +
     {
       if (requireNamespace("ggrepel", quietly = TRUE)) {
@@ -614,13 +777,13 @@ draw_equity_plot <- function(result, preview = FALSE) {
     ggplot2::scale_fill_manual(values = clinical_cols(length(unique(d$region)))) +
     ggplot2::scale_size_continuous(range = c(3.5, 9.5), guide = "none") +
     ggplot2::scale_y_continuous(labels = scales::label_number(big.mark = ","), expand = ggplot2::expansion(mult = c(0.04, 0.12))) +
-    ggplot2::scale_x_continuous(limits = c(max(0, min(d$sdi, na.rm = TRUE) - 0.04), min(1, max(d$sdi, na.rm = TRUE) + 0.04))) +
+    ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0.06, 0.10))) +
     ggplot2::labs(
-      title = if (preview) "SDI 梯度" else "社会人口发展水平的负担梯度",
-      subtitle = paste0(result$meta$end_year, " 年估计值；点大小反映数据中的人口规模"),
-      x = "社会人口指数 (SDI)",
+      title = title,
+      subtitle = subtitle,
+      x = x_lab,
       y = paste(result$meta$measure, result$meta$metric),
-      caption = "此图为生态学描述，不应解读为个体层面因果关系。"
+      caption = caption
     ) +
     publication_theme(base_size = base_size) +
     ggplot2::theme(legend.position = "top", legend.box = "vertical")
@@ -712,7 +875,36 @@ draw_eapc_plot <- function(result, preview = FALSE) {
   d <- result$trend_table
   d <- d[is.finite(d$eapc) & is.finite(d$eapc_low) & is.finite(d$eapc_high), , drop = FALSE]
   if (nrow(d) == 0) {
-    draw_plot_message("EAPC 图未生成", c("当前数据没有足够年份拟合 EAPC。"))
+    d2 <- result$trend_table
+    d2 <- d2[is.finite(d2$percent_change), , drop = FALSE]
+    if (nrow(d2) == 0) {
+      draw_plot_message("EAPC 图未生成", c("当前数据没有足够年份拟合 EAPC，也没有可用的起止变化。"))
+      return(invisible(NULL))
+    }
+    d2$change_pct <- 100 * d2$percent_change
+    d2 <- d2[order(d2$change_pct), , drop = FALSE]
+    d2 <- head(d2, 16)
+    d2$location_label <- factor(short_label(d2$location, 22), levels = short_label(d2$location, 22))
+    d2$trend <- ifelse(d2$change_pct > 0, "Increase", "Decrease")
+    th <- clinical_theme()
+    base_size <- if (preview) 11 else 14
+    p <- ggplot2::ggplot(d2, ggplot2::aes(change_pct, location_label)) +
+      ggplot2::geom_vline(xintercept = 0, colour = th$navy, linewidth = 0.75, linetype = "22") +
+      ggplot2::geom_col(ggplot2::aes(fill = trend), width = 0.62, alpha = 0.9) +
+      ggplot2::geom_text(ggplot2::aes(label = paste0(fmt_num(change_pct, 1), "%")), hjust = ifelse(d2$change_pct >= 0, -0.12, 1.12), size = if (preview) 2.65 else 3.1, family = plot_family(), colour = th$ink) +
+      ggplot2::scale_fill_manual(values = c(Increase = th$red, Decrease = th$teal)) +
+      ggplot2::scale_x_continuous(labels = function(x) paste0(x, "%"), expand = ggplot2::expansion(mult = c(0.16, 0.18))) +
+      ggplot2::labs(
+        title = if (preview) "起止变化排名" else "年份不足时的起止相对变化排名",
+        subtitle = "当前数据不足以拟合 EAPC，改用分析窗口起止年份的相对变化。",
+        x = "相对变化",
+        y = NULL,
+        caption = "该图是 EAPC 的替代描述，不代表年均变化率。"
+      ) +
+      publication_theme(base_size = base_size, grid_y = FALSE) +
+      ggplot2::theme(axis.text.y = ggplot2::element_text(face = "bold"), legend.position = "top") +
+      ggplot2::coord_cartesian(clip = "off")
+    print(p)
     return(invisible(NULL))
   }
   keep <- unique(c(
@@ -790,25 +982,26 @@ draw_quadrant_plot <- function(result, preview = FALSE) {
     return(invisible(NULL))
   }
   d <- result$trend_table
-  d <- d[is.finite(d$latest_value) & is.finite(d$eapc), , drop = FALSE]
-  if (nrow(d) < 3) {
-    draw_plot_message("象限图未生成", c("当前地区数量不足。"))
+  d <- d[is.finite(d$latest_value), , drop = FALSE]
+  if (nrow(d) == 0) {
+    draw_plot_message("象限图未生成", c("当前筛选没有可用于比较的估计值。"))
     return(invisible(NULL))
   }
+  d$trend_signal <- ifelse(is.finite(d$eapc), d$eapc, ifelse(is.finite(d$percent_change), 100 * d$percent_change, 0))
   x_mid <- stats::median(d$latest_value, na.rm = TRUE)
   y_mid <- 0
   d$plot_size <- ifelse(is.finite(d$population), d$population, 1)
-  d$priority <- ifelse(d$latest_value >= x_mid & d$eapc > 0, "High burden + rising",
-                       ifelse(d$latest_value >= x_mid, "High burden", ifelse(d$eapc > 0, "Rising", "Lower priority")))
+  d$priority <- ifelse(d$latest_value >= x_mid & d$trend_signal > 0, "High burden + rising",
+                       ifelse(d$latest_value >= x_mid, "High burden", ifelse(d$trend_signal > 0, "Rising", "Lower priority")))
   label_idx <- unique(c(
     which(d$location == result$meta$focus_location),
     order(-d$latest_value)[seq_len(min(4, nrow(d)))],
-    order(-d$eapc)[seq_len(min(3, nrow(d)))]
+    order(-d$trend_signal)[seq_len(min(3, nrow(d)))]
   ))
   label_df <- d[label_idx, , drop = FALSE]
   th <- clinical_theme()
   base_size <- if (preview) 11 else 14
-  p <- ggplot2::ggplot(d, ggplot2::aes(latest_value, eapc)) +
+  p <- ggplot2::ggplot(d, ggplot2::aes(latest_value, trend_signal)) +
     ggplot2::annotate("rect", xmin = x_mid, xmax = Inf, ymin = 0, ymax = Inf, fill = "#FFF1E7", alpha = 0.75) +
     ggplot2::geom_hline(yintercept = y_mid, colour = "#B7C8C4", linewidth = 0.65, linetype = "22") +
     ggplot2::geom_vline(xintercept = x_mid, colour = "#B7C8C4", linewidth = 0.65, linetype = "22") +
@@ -828,10 +1021,406 @@ draw_quadrant_plot <- function(result, preview = FALSE) {
       title = if (preview) "优先象限" else "负担水平与趋势优先象限图",
       subtitle = "右上角地区兼具当前高负担和上升趋势。",
       x = paste("最新", result$meta$measure, result$meta$metric),
-      y = "EAPC（%/年）",
-      caption = "气泡大小反映数据中的人口规模。"
+      y = if (any(is.finite(d$eapc))) "EAPC（%/年）" else "相对变化（%）",
+      caption = "气泡大小反映数据中的人口规模；人口缺失时使用统一大小。"
     ) +
     publication_theme(base_size = base_size, grid_y = TRUE) +
     ggplot2::theme(legend.position = "top")
   print(p)
+}
+
+draw_contribution_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$contribution_table
+  if (is.null(d) || nrow(d) == 0) {
+    draw_plot_message("构成图未生成", c("当前筛选没有可用于构成分析的记录。"))
+    return(invisible(NULL))
+  }
+  d <- d[order(-d$val), , drop = FALSE]
+  if (nrow(d) > 12) {
+    top <- d[seq_len(11), , drop = FALSE]
+    other <- d[-seq_len(11), , drop = FALSE]
+    d <- rbind(
+      top,
+      data.frame(
+        dimension = top$dimension[[1]],
+        component = "Other",
+        location = top$location[[1]],
+        year = top$year[[1]],
+        val = sum(other$val, na.rm = TRUE),
+        share = sum(other$share, na.rm = TRUE),
+        lower = sum(other$lower, na.rm = TRUE),
+        upper = sum(other$upper, na.rm = TRUE),
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  d$component_label <- factor(short_label(d$component, 18), levels = rev(short_label(d$component, 18)))
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  p <- ggplot2::ggplot(d, ggplot2::aes(val, component_label)) +
+    ggplot2::geom_col(ggplot2::aes(fill = share), width = 0.66, colour = "#FFFFFF", linewidth = 0.35) +
+    ggplot2::geom_text(ggplot2::aes(label = paste0(fmt_pct(share), "  ", fmt_num(val, 2))), hjust = -0.08, size = if (preview) 2.6 else 3.05, family = plot_family(), colour = th$ink) +
+    ggplot2::scale_fill_gradient(low = "#BFE1D4", high = th$red, labels = scales::label_percent(accuracy = 1)) +
+    ggplot2::scale_x_continuous(labels = scales::label_number(big.mark = ","), expand = ggplot2::expansion(mult = c(0.02, 0.26))) +
+    ggplot2::labs(
+      title = if (preview) "构成贡献" else "最新年份构成贡献",
+      subtitle = paste0(d$location[[1]], " | ", d$year[[1]], " | 按 ", d$dimension[[1]], " 汇总"),
+      x = paste(result$meta$measure, result$meta$metric),
+      y = NULL,
+      caption = "多病因/多年龄/多文件上传时，该图用于识别主要贡献来源。"
+    ) +
+    publication_theme(base_size = base_size, grid_y = FALSE) +
+    ggplot2::theme(axis.text.y = ggplot2::element_text(face = "bold"), legend.position = "right", legend.title = ggplot2::element_blank()) +
+    ggplot2::coord_cartesian(clip = "off")
+  print(p)
+}
+
+draw_age_pattern_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$age_pattern_table
+  if (is.null(d) || nrow(d) == 0) {
+    draw_plot_message("年龄谱图未生成", c("当前筛选没有年龄分层。"))
+    return(invisible(NULL))
+  }
+  d <- d[order(-d$val), , drop = FALSE]
+  d <- head(d, 18)
+  d$age_label <- factor(short_label(d$age, 16), levels = rev(short_label(d$age, 16)))
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  p <- ggplot2::ggplot(d, ggplot2::aes(val, age_label)) +
+    ggplot2::geom_segment(ggplot2::aes(x = lower, xend = upper, yend = age_label), colour = "#AABBB7", linewidth = 0.95, lineend = "round") +
+    ggplot2::geom_point(shape = 21, fill = th$teal, colour = "#FFFFFF", stroke = 0.9, size = 4.2) +
+    ggplot2::geom_text(ggplot2::aes(label = fmt_num(val, 2)), hjust = -0.12, size = if (preview) 2.55 else 3.0, family = plot_family(), colour = th$ink) +
+    ggplot2::scale_x_continuous(labels = scales::label_number(big.mark = ","), expand = ggplot2::expansion(mult = c(0.03, 0.20))) +
+    ggplot2::labs(
+      title = if (preview) "年龄谱" else "最新年份年龄分层谱",
+      subtitle = paste0(d$location[[1]], " | ", d$year[[1]], " | 点为估计值，线为区间"),
+      x = paste(result$meta$measure, result$meta$metric),
+      y = NULL,
+      caption = "适合判断疾病/暴露负担主要集中在哪些年龄层；若仅有 All Ages，则作为总量展示。"
+    ) +
+    publication_theme(base_size = base_size, grid_y = FALSE) +
+    ggplot2::theme(axis.text.y = ggplot2::element_text(face = "bold")) +
+    ggplot2::coord_cartesian(clip = "off")
+  print(p)
+}
+
+draw_waterfall_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$trend_table
+  d <- d[is.finite(d$absolute_change), , drop = FALSE]
+  if (nrow(d) == 0) {
+    draw_plot_message("变化瀑布图未生成", c("当前筛选没有可用于起止变化分析的记录。"))
+    return(invisible(NULL))
+  }
+  d <- d[order(abs(d$absolute_change), decreasing = TRUE), , drop = FALSE]
+  d <- head(d, 18)
+  d <- d[order(d$absolute_change), , drop = FALSE]
+  d$location_label <- factor(short_label(d$location, 22), levels = short_label(d$location, 22))
+  d$direction <- ifelse(d$absolute_change >= 0, "Increase", "Decrease")
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  p <- ggplot2::ggplot(d, ggplot2::aes(absolute_change, location_label)) +
+    ggplot2::geom_vline(xintercept = 0, colour = "#AFC2BD", linewidth = 0.8, linetype = "22") +
+    ggplot2::geom_col(ggplot2::aes(fill = direction), width = 0.68, alpha = 0.92) +
+    ggplot2::geom_text(ggplot2::aes(label = fmt_num(absolute_change, 2)), hjust = ifelse(d$absolute_change >= 0, -0.12, 1.12), size = if (preview) 2.55 else 3.0, family = plot_family(), colour = th$ink) +
+    ggplot2::scale_fill_manual(values = c(Increase = th$red, Decrease = th$teal)) +
+    ggplot2::scale_x_continuous(labels = scales::label_number(big.mark = ","), expand = ggplot2::expansion(mult = c(0.18, 0.18))) +
+    ggplot2::labs(
+      title = if (preview) "变化瀑布图" else "起止年份绝对变化瀑布图",
+      subtitle = paste0(result$meta$start_year, "-", result$meta$end_year, " | 按绝对变化幅度筛选"),
+      x = paste("变化量：", result$meta$measure, result$meta$metric),
+      y = NULL,
+      caption = "用于快速识别变化贡献最大的地区；正值表示上升，负值表示下降。"
+    ) +
+    publication_theme(base_size = base_size, grid_y = FALSE) +
+    ggplot2::theme(axis.text.y = ggplot2::element_text(face = "bold"), legend.position = "top") +
+    ggplot2::coord_cartesian(clip = "off")
+  print(p)
+}
+
+draw_bump_rank_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$plot_data
+  if (nrow(d) == 0 || length(unique(d$year)) < 2 || length(unique(d$location)) < 2) {
+    draw_plot_message("排名迁移图未生成", c("至少需要 2 个地区和 2 个年份。"))
+    return(invisible(NULL))
+  }
+  d <- d[is.finite(d$val), , drop = FALSE]
+  years_keep <- unique(round(seq(min(d$year), max(d$year), length.out = min(8, length(unique(d$year))))))
+  years_keep <- sort(unique(d$year[d$year %in% years_keep]))
+  if (length(years_keep) < 2) years_keep <- sort(unique(d$year))
+  latest_locations <- result$trend_table$location[seq_len(min(10, nrow(result$trend_table)))]
+  d <- d[d$year %in% years_keep & d$location %in% latest_locations, , drop = FALSE]
+  d$rank <- ave(-d$val, d$year, FUN = function(x) rank(x, ties.method = "first"))
+  d$location_label <- short_label(d$location, 14)
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  latest <- d[d$year == max(d$year), , drop = FALSE]
+  p <- ggplot2::ggplot(d, ggplot2::aes(year, rank, group = location, colour = location)) +
+    ggplot2::geom_line(linewidth = 1.2, alpha = 0.86, lineend = "round") +
+    ggplot2::geom_point(shape = 21, fill = "#FFFFFF", stroke = 0.9, size = 3.0) +
+    {
+      if (requireNamespace("ggrepel", quietly = TRUE)) {
+        ggrepel::geom_text_repel(data = latest, ggplot2::aes(label = location_label), direction = "y", nudge_x = 0.5, hjust = 0, family = plot_family(), size = if (preview) 2.45 else 2.95, colour = th$ink, segment.colour = "#B6C6C1", segment.size = 0.22, show.legend = FALSE)
+      } else {
+        ggplot2::geom_text(data = latest, ggplot2::aes(label = location_label), hjust = -0.05, family = plot_family(), size = if (preview) 2.45 else 2.95, show.legend = FALSE)
+      }
+    } +
+    ggplot2::scale_colour_manual(values = clinical_cols(length(unique(d$location)))) +
+    ggplot2::scale_y_reverse(breaks = sort(unique(d$rank)), expand = ggplot2::expansion(mult = c(0.06, 0.12))) +
+    ggplot2::scale_x_continuous(breaks = years_keep, expand = ggplot2::expansion(mult = c(0.03, 0.16))) +
+    ggplot2::labs(
+      title = if (preview) "排名迁移" else "地区负担排名迁移图",
+      subtitle = "显示不同年份中高负担地区的排序变化，适合讲趋势故事。",
+      x = NULL,
+      y = "Rank",
+      caption = "Rank 1 表示当年最高负担；右侧标签为最新年份地区。"
+    ) +
+    publication_theme(base_size = base_size) +
+    ggplot2::theme(legend.position = "none", axis.text.y = ggplot2::element_text(face = "bold")) +
+    ggplot2::coord_cartesian(clip = "off")
+  print(p)
+}
+
+draw_small_multiples_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$plot_data
+  if (nrow(d) == 0) {
+    draw_plot_message("小多图未生成", c("当前筛选没有可用时间序列。"))
+    return(invisible(NULL))
+  }
+  d <- d[d$location %in% unique(result$trend_table$location[seq_len(min(12, nrow(result$trend_table)))]), , drop = FALSE]
+  d$location_label <- short_label(d$location, 18)
+  th <- clinical_theme()
+  base_size <- if (preview) 10 else 13
+  p <- ggplot2::ggplot(d, ggplot2::aes(year, val)) +
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = lower, ymax = upper), fill = "#DCECE6", alpha = 0.75) +
+    ggplot2::geom_line(colour = th$teal, linewidth = 1.05, lineend = "round") +
+    ggplot2::geom_point(data = d[d$year == max(d$year), , drop = FALSE], shape = 21, fill = th$red, colour = "#FFFFFF", size = 2.5, stroke = 0.7) +
+    ggplot2::facet_wrap(~ location_label, scales = "free_y", ncol = if (preview) 4 else 3) +
+    ggplot2::scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+    ggplot2::labs(
+      title = if (preview) "地区小多图" else "地区趋势小多图",
+      subtitle = "同一筛选下多个地区的时间轨迹并列展示，能直观看到异质性。",
+      x = NULL,
+      y = paste(result$meta$measure, result$meta$metric),
+      caption = "每个小图使用独立 y 轴，适合观察形态；比较绝对值请结合排名表。"
+    ) +
+    publication_theme(base_size = base_size) +
+    ggplot2::theme(
+      strip.text = ggplot2::element_text(face = "bold", colour = th$ink),
+      panel.grid.major.x = ggplot2::element_blank(),
+      legend.position = "none"
+    )
+  print(p)
+}
+
+draw_distribution_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$series
+  d <- d[d$year >= result$meta$start_year & d$year <= result$meta$end_year & is.finite(d$val), , drop = FALSE]
+  if (nrow(d) == 0) {
+    draw_plot_message("分布图未生成", c("当前筛选没有可用于分布分析的记录。"))
+    return(invisible(NULL))
+  }
+  years <- sort(unique(d$year))
+  keep_years <- unique(round(seq(min(years), max(years), length.out = min(8, length(years)))))
+  keep_years <- years[years %in% keep_years]
+  if (length(keep_years) < 2) keep_years <- years
+  d <- d[d$year %in% keep_years, , drop = FALSE]
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  p <- ggplot2::ggplot(d, ggplot2::aes(factor(year), val)) +
+    ggplot2::geom_boxplot(width = 0.55, outlier.shape = 21, outlier.fill = "#FFFFFF", outlier.colour = th$red, colour = "#7E928D", fill = "#EAF4F0", linewidth = 0.65) +
+    ggplot2::geom_jitter(width = 0.12, size = 1.6, alpha = 0.42, colour = th$teal) +
+    ggplot2::scale_y_continuous(labels = scales::label_number(big.mark = ","), expand = ggplot2::expansion(mult = c(0.04, 0.12))) +
+    ggplot2::labs(
+      title = if (preview) "地区分布" else "地区负担分布演变",
+      subtitle = "比较不同年份各地区估计值的离散程度和异常高值。",
+      x = NULL,
+      y = paste(result$meta$measure, result$meta$metric),
+      caption = "箱线表示地区分布，中位数和离散度可辅助描述不平等/异质性。"
+    ) +
+    publication_theme(base_size = base_size) +
+    ggplot2::theme(panel.grid.major.x = ggplot2::element_blank())
+  print(p)
+}
+
+draw_share_stream_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  s <- result$selected
+  focus <- result$meta$focus_location
+  d_focus <- s
+  if (focus %in% s$location) d_focus <- s[s$location == focus, , drop = FALSE]
+  if (length(unique(d_focus$cause)) > 1) {
+    d <- d_focus
+    dimension <- "cause"
+    place <- focus
+  } else if (length(unique(d_focus$age)) > 1) {
+    d <- d_focus
+    dimension <- "age"
+    place <- focus
+  } else if (length(unique(s$location)) > 1) {
+    d <- s
+    dimension <- "location"
+    place <- "Selected locations"
+  } else if (length(unique(d_focus$measure)) > 1) {
+    d <- d_focus
+    dimension <- "measure"
+    place <- focus
+  } else {
+    d <- d_focus
+    dimension <- "source_file"
+    place <- focus
+  }
+  grouped <- aggregate(d["val"], by = list(year = d$year, component = d[[dimension]]), FUN = function(x) sum(x[is.finite(x)], na.rm = TRUE))
+  if (nrow(grouped) == 0 || length(unique(grouped$year)) < 2) {
+    draw_plot_message("构成流图未生成", c("至少需要 2 个年份才能展示构成随时间变化。"))
+    return(invisible(NULL))
+  }
+  latest <- grouped[grouped$year == max(grouped$year), , drop = FALSE]
+  keep <- head(latest$component[order(-latest$val)], 8)
+  grouped$component <- ifelse(grouped$component %in% keep, grouped$component, "Other")
+  grouped <- aggregate(grouped["val"], by = grouped[c("year", "component")], FUN = sum, na.rm = TRUE)
+  totals <- aggregate(val ~ year, grouped, sum, na.rm = TRUE)
+  grouped$total <- totals$val[match(grouped$year, totals$year)]
+  grouped$share <- ifelse(grouped$total > 0, grouped$val / grouped$total, NA_real_)
+  grouped$component_label <- short_label(grouped$component, 16)
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  p <- ggplot2::ggplot(grouped, ggplot2::aes(year, share, fill = component_label)) +
+    ggplot2::geom_area(colour = "#FFFFFF", linewidth = 0.22, alpha = 0.94) +
+    ggplot2::scale_fill_manual(values = clinical_cols(length(unique(grouped$component_label)))) +
+    ggplot2::scale_y_continuous(labels = scales::label_percent(accuracy = 1), expand = c(0, 0)) +
+    ggplot2::scale_x_continuous(expand = c(0, 0), breaks = pretty(grouped$year, n = if (preview) 6 else 9)) +
+    ggplot2::labs(
+      title = if (preview) "构成流图" else "构成随时间变化流图",
+      subtitle = paste0(place, " | 按 ", dimension, " 展示份额变化"),
+      x = NULL,
+      y = "Share",
+      caption = "适合病因拆分、年龄拆分或多地区比较；显示结构而非绝对负担。"
+    ) +
+    publication_theme(base_size = base_size) +
+    ggplot2::theme(legend.position = "right", panel.grid.major = ggplot2::element_blank())
+  print(p)
+}
+
+draw_uncertainty_fan_plot <- function(result, preview = FALSE) {
+  if (!require_plot_packages()) {
+    draw_plot_message("缺少绘图包", c("请安装 ggplot2 与 scales 后重新运行。"))
+    return(invisible(NULL))
+  }
+  d <- result$focus_series
+  if (nrow(d) == 0 || length(unique(d$year)) < 2) {
+    draw_plot_message("不确定性扇形图未生成", c("焦点地区至少需要 2 个年份。"))
+    return(invisible(NULL))
+  }
+  d$ui_width <- d$upper - d$lower
+  d$relative_ui <- ifelse(d$val != 0, d$ui_width / abs(d$val), NA_real_)
+  th <- clinical_theme()
+  base_size <- if (preview) 11 else 14
+  p <- ggplot2::ggplot(d, ggplot2::aes(year, val)) +
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = lower, ymax = upper, fill = relative_ui), alpha = 0.78) +
+    ggplot2::geom_line(colour = th$ink, linewidth = 1.35, lineend = "round") +
+    ggplot2::geom_point(shape = 21, fill = "#FFFFFF", colour = th$red, stroke = 0.9, size = 3.2) +
+    ggplot2::scale_fill_gradient(low = "#DDEFE9", high = th$red, labels = scales::label_percent(accuracy = 1), name = "Relative UI") +
+    ggplot2::scale_y_continuous(labels = scales::label_number(big.mark = ","), expand = ggplot2::expansion(mult = c(0.05, 0.12))) +
+    ggplot2::labs(
+      title = if (preview) "不确定性扇形" else paste0(result$meta$focus_location, " 不确定性扇形图"),
+      subtitle = "同时展示估计值、上下限与相对不确定性宽度。",
+      x = NULL,
+      y = paste(result$meta$measure, result$meta$metric),
+      caption = "颜色越深表示相对不确定性越宽，结果解释应更谨慎。"
+    ) +
+    publication_theme(base_size = base_size) +
+    ggplot2::theme(legend.position = "right")
+  print(p)
+}
+
+draw_storyboard_plot <- function(result, preview = FALSE) {
+  th <- clinical_theme()
+  t <- result$trend_table
+  if (nrow(t) == 0) {
+    draw_plot_message("综合看板未生成", c("当前筛选没有可用于总览的结果。"))
+    return(invisible(NULL))
+  }
+  focus <- t[t$location == result$meta$focus_location, , drop = FALSE]
+  if (nrow(focus) == 0) focus <- t[1, , drop = FALSE]
+  top <- head(t[order(-t$latest_value), , drop = FALSE], 6)
+  top$bar <- top$latest_value / max(top$latest_value, na.rm = TRUE)
+  contrib <- result$contribution_table
+  contrib <- contrib[order(-contrib$val), , drop = FALSE]
+  contrib <- head(contrib, 5)
+  contrib$bar <- if (max(contrib$val, na.rm = TRUE) > 0) contrib$val / max(contrib$val, na.rm = TRUE) else 0
+  grid::grid.newpage()
+  grid::grid.rect(gp = grid::gpar(fill = "#F5F8F7", col = NA))
+  grid::grid.roundrect(x = 0.5, y = 0.5, width = 0.94, height = 0.90, r = grid::unit(14, "pt"),
+                       gp = grid::gpar(fill = "#FFFFFF", col = "#D8E7E2", lwd = 1.2))
+  grid::grid.text("GBD Result Intelligence Board", x = 0.07, y = 0.91, just = "left",
+                  gp = grid::gpar(col = th$ink, fontsize = if (preview) 20 else 24, fontface = "bold", fontfamily = plot_family()))
+  grid::grid.text(paste0(result$meta$cause, " | ", result$meta$measure, " / ", result$meta$metric, " | ", result$meta$start_year, "-", result$meta$end_year),
+                  x = 0.07, y = 0.865, just = "left",
+                  gp = grid::gpar(col = th$muted, fontsize = if (preview) 10 else 12, fontfamily = plot_family()))
+  card_x <- c(0.18, 0.39, 0.60, 0.81)
+  card_titles <- c("分析记录", "地区数", "焦点最新值", "变化信号")
+  signal <- if (is.finite(focus$eapc)) paste0(fmt_num(focus$eapc, 2), "%/年") else fmt_pct(focus$percent_change)
+  card_values <- c(format(nrow(result$selected), big.mark = ","), result$meta$n_locations, fmt_num(focus$latest_value, 2), signal)
+  card_subs <- c(result$meta$data_type, result$meta$year_range, result$meta$focus_location, "EAPC 或起止变化")
+  for (i in seq_along(card_x)) {
+    grid::grid.roundrect(x = card_x[[i]], y = 0.76, width = 0.18, height = 0.13, r = grid::unit(10, "pt"),
+                         gp = grid::gpar(fill = c("#F2FAF7", "#F7F8FE", "#FFF7EC", "#F8F4FC")[[i]], col = "#DCE8E3", lwd = 1))
+    grid::grid.text(card_titles[[i]], x = card_x[[i]] - 0.07, y = 0.79, just = "left", gp = grid::gpar(col = th$muted, fontsize = 9.5, fontfamily = plot_family()))
+    grid::grid.text(card_values[[i]], x = card_x[[i]] - 0.07, y = 0.755, just = "left", gp = grid::gpar(col = th$ink, fontsize = if (preview) 16 else 19, fontface = "bold", fontfamily = plot_family()))
+    grid::grid.text(card_subs[[i]], x = card_x[[i]] - 0.07, y = 0.715, just = "left", gp = grid::gpar(col = th$muted, fontsize = 8.8, fontfamily = plot_family()))
+  }
+  grid::grid.roundrect(x = 0.29, y = 0.43, width = 0.42, height = 0.46, r = grid::unit(12, "pt"), gp = grid::gpar(fill = "#FAFCFB", col = "#E1ECE8"))
+  grid::grid.text("High-Burden Ranking", x = 0.10, y = 0.62, just = "left", gp = grid::gpar(col = th$ink, fontsize = 14, fontface = "bold", fontfamily = plot_family()))
+  y0 <- 0.57
+  for (i in seq_len(nrow(top))) {
+    y <- y0 - (i - 1) * 0.055
+    grid::grid.text(short_label(top$location[[i]], 20), x = 0.10, y = y, just = "left", gp = grid::gpar(col = th$ink, fontsize = 9, fontfamily = plot_family()))
+    grid::grid.roundrect(x = 0.31, y = y, width = 0.20, height = 0.022, r = grid::unit(5, "pt"), gp = grid::gpar(fill = "#ECF2F0", col = NA))
+    grid::grid.roundrect(x = 0.21 + 0.10 * top$bar[[i]], y = y, width = 0.20 * top$bar[[i]], height = 0.022, r = grid::unit(5, "pt"), gp = grid::gpar(fill = clinical_cols(6)[[i]], col = NA))
+    grid::grid.text(fmt_num(top$latest_value[[i]], 2), x = 0.53, y = y, just = "right", gp = grid::gpar(col = th$muted, fontsize = 8.5, fontfamily = plot_family()))
+  }
+  grid::grid.roundrect(x = 0.74, y = 0.43, width = 0.36, height = 0.46, r = grid::unit(12, "pt"), gp = grid::gpar(fill = "#FAFCFB", col = "#E1ECE8"))
+  grid::grid.text("Contribution Structure", x = 0.59, y = 0.62, just = "left", gp = grid::gpar(col = th$ink, fontsize = 14, fontface = "bold", fontfamily = plot_family()))
+  y1 <- 0.57
+  for (i in seq_len(nrow(contrib))) {
+    y <- y1 - (i - 1) * 0.060
+    grid::grid.text(short_label(contrib$component[[i]], 20), x = 0.59, y = y, just = "left", gp = grid::gpar(col = th$ink, fontsize = 9, fontfamily = plot_family()))
+    grid::grid.roundrect(x = 0.78, y = y, width = 0.18, height = 0.024, r = grid::unit(5, "pt"), gp = grid::gpar(fill = "#ECF2F0", col = NA))
+    grid::grid.roundrect(x = 0.69 + 0.09 * contrib$bar[[i]], y = y, width = 0.18 * contrib$bar[[i]], height = 0.024, r = grid::unit(5, "pt"), gp = grid::gpar(fill = c(th$red, th$teal, th$navy, th$amber, th$violet)[[i]], col = NA))
+    grid::grid.text(fmt_pct(contrib$share[[i]]), x = 0.90, y = y, just = "right", gp = grid::gpar(col = th$muted, fontsize = 8.5, fontfamily = plot_family()))
+  }
+  grid::grid.roundrect(x = 0.5, y = 0.15, width = 0.84, height = 0.16, r = grid::unit(12, "pt"),
+                       gp = grid::gpar(fill = "#F8FBFA", col = "#E1ECE8"))
+  insight <- paste(result$insights, collapse = "  ")
+  grid::grid.text("Interpretation-ready Signal", x = 0.10, y = 0.20, just = "left",
+                  gp = grid::gpar(col = th$red, fontsize = 12, fontface = "bold", fontfamily = plot_family()))
+  grid::grid.text(paste(strwrap(insight, width = if (preview) 118 else 135), collapse = "\n"), x = 0.10, y = 0.135, just = "left",
+                  gp = grid::gpar(col = th$ink, fontsize = if (preview) 8.5 else 10, lineheight = 1.2, fontfamily = plot_family()))
 }

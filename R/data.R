@@ -68,20 +68,21 @@ read_csv_smart <- function(path) {
 standardize_gbd_data <- function(data) {
   data <- as.data.frame(data, stringsAsFactors = FALSE, check.names = FALSE)
   fields <- list(
-    measure = c("measure_name", "measure"),
-    location = c("location_name", "location", "location_label", "loc_name"),
-    sex = c("sex_name", "sex"),
-    age = c("age_name", "age", "age_group_name"),
-    cause = c("cause_name", "cause", "rei_name", "risk_name", "sequela_name"),
-    metric = c("metric_name", "metric"),
-    year = c("year", "year_id"),
-    val = c("val", "value", "mean", "estimate"),
-    upper = c("upper", "upper_ui", "upper_bound", "hi"),
-    lower = c("lower", "lower_ui", "lower_bound", "lo"),
-    region = c("region", "region_name", "super_region_name"),
+    measure = c("measure_name", "measure", "measure_label", "measure_short", "measure_id"),
+    location = c("location_name", "location_name.x", "location_name.y", "location", "location_label", "loc_name", "loc", "ihme_loc_id", "location_id"),
+    sex = c("sex_name", "sex", "gender", "gender_name", "sex_id"),
+    age = c("age_name", "age", "age_group_name", "age_group", "age_group_id", "age_id"),
+    cause = c("cause_name", "cause", "rei_name", "risk_name", "sequela_name", "etiology", "etiology_name", "covariate_name", "cause_label", "cause_id", "rei_id", "risk_id"),
+    metric = c("metric_name", "metric", "unit", "units", "unit_name", "metric_id"),
+    year = c("year", "year_id", "year_name", "year_start", "year_mid", "year_end"),
+    val = c("val", "value", "mean", "median", "estimate", "draw_mean", "rate", "number", "percent"),
+    upper = c("upper", "upper_ui", "upper_bound", "upper_95", "upper_95_ui", "upper_uncertainty", "hi", "ucl", "q975"),
+    lower = c("lower", "lower_ui", "lower_bound", "lower_95", "lower_95_ui", "lower_uncertainty", "lo", "lcl", "q025"),
+    region = c("region", "region_name", "super_region_name", "super_region", "gbd_region"),
     sdi = c("sdi", "sdi_index", "sociodemographic_index"),
     population = c("population", "pop", "population_m"),
-    source_file = c("source_file", ".source_file")
+    source_file = c("source_file", ".source_file"),
+    data_type = c("data_type", "gbd_data_type")
   )
 
   out <- data.frame(.row_id = seq_len(nrow(data)), stringsAsFactors = FALSE)
@@ -108,7 +109,8 @@ standardize_gbd_data <- function(data) {
     region = "Not specified",
     sdi = NA_real_,
     population = NA_real_,
-    source_file = "Not specified"
+    source_file = "Not specified",
+    data_type = "Tabular estimate"
   )
   for (field in names(defaults)) {
     if (!field %in% names(out)) out[[field]] <- rep(defaults[[field]], n)
@@ -120,11 +122,26 @@ standardize_gbd_data <- function(data) {
   if (!"upper" %in% names(out)) out$upper <- out$val * 1.10
   out$lower <- safe_numeric(out$lower)
   out$upper <- safe_numeric(out$upper)
+  out$lower[!is.finite(out$lower)] <- out$val[!is.finite(out$lower)] * 0.90
+  out$upper[!is.finite(out$upper)] <- out$val[!is.finite(out$upper)] * 1.10
   out$sdi <- safe_numeric(out$sdi)
   out$population <- safe_numeric(out$population)
 
-  text_fields <- c("measure", "location", "sex", "age", "cause", "metric", "region", "source_file")
+  text_fields <- c("measure", "location", "sex", "age", "cause", "metric", "region", "source_file", "data_type")
   for (field in text_fields) out[[field]] <- trimws(as.character(out[[field]]))
+  numeric_location <- grepl("^[0-9]+$", out$location)
+  out$location[numeric_location] <- paste0("Location ID ", out$location[numeric_location])
+  numeric_measure <- grepl("^[0-9]+$", out$measure)
+  out$measure[numeric_measure] <- paste0("Measure ID ", out$measure[numeric_measure])
+  numeric_sex <- grepl("^[0-9]+$", out$sex)
+  out$sex[numeric_sex] <- paste0("Sex ID ", out$sex[numeric_sex])
+  numeric_age <- grepl("^[0-9]+$", out$age)
+  out$age[numeric_age] <- paste0("Age group ID ", out$age[numeric_age])
+  numeric_cause <- grepl("^[0-9]+$", out$cause)
+  out$cause[numeric_cause] <- paste0("Cause/Risk ID ", out$cause[numeric_cause])
+  numeric_metric <- grepl("^[0-9]+$", out$metric)
+  out$metric[numeric_metric] <- paste0("Metric ID ", out$metric[numeric_metric])
+  out$measure[tolower(out$measure) == "countinuous"] <- "Continuous"
   out <- out[is.finite(out$year) & is.finite(out$val), , drop = FALSE]
   out$.row_id <- NULL
   rownames(out) <- NULL
@@ -132,12 +149,30 @@ standardize_gbd_data <- function(data) {
 }
 
 is_supported_gbd_file <- function(name) {
-  tolower(tools::file_ext(name)) %in% c("csv", "tsv", "txt")
+  ext <- tolower(tools::file_ext(name))
+  ext %in% c("csv", "tsv", "txt", "tif", "tiff", "xlsx", "xls", "gz") &
+    !grepl("\\.tar\\.gz$", tolower(name))
 }
 
 read_gbd_file <- function(path, name = basename(path)) {
   ext <- tolower(tools::file_ext(name))
   if (ext == "zip") return(read_gbd_zip(path, name))
+  if (ext == "gz") {
+    inner <- sub("\\.gz$", "", name, ignore.case = TRUE)
+    inner_ext <- tolower(tools::file_ext(inner))
+    if (inner_ext %in% c("csv", "txt")) {
+      out <- standardize_gbd_data(read_csv_smart(path))
+      out$source_file <- basename(name)
+      return(out)
+    }
+    if (inner_ext == "tsv") {
+      out <- standardize_gbd_data(utils::read.delim(path, stringsAsFactors = FALSE, check.names = FALSE))
+      out$source_file <- basename(name)
+      return(out)
+    }
+  }
+  if (ext %in% c("tif", "tiff")) return(read_gbd_tif(path, name))
+  if (ext %in% c("xlsx", "xls")) return(read_gbd_excel(path, name))
   if (ext %in% c("csv", "txt")) {
     out <- standardize_gbd_data(read_csv_smart(path))
     out$source_file <- basename(name)
@@ -148,24 +183,119 @@ read_gbd_file <- function(path, name = basename(path)) {
     out$source_file <- basename(name)
     return(out)
   }
-  stop("目前支持 IHME/GBD Results Tool 导出的 CSV/TSV/TXT 文件，或包含这些文件的 ZIP 压缩包。")
+  stop("目前支持 IHME/GBD Results Tool 导出的 CSV/TSV/TXT/XLSX/TIF/CSV.GZ 文件，或包含这些文件的 ZIP 压缩包。")
+}
+
+read_gbd_excel <- function(path, name = basename(path)) {
+  if (!requireNamespace("readxl", quietly = TRUE)) {
+    stop("检测到 Excel 文件，但本机尚未安装 readxl 包。请安装 readxl，或上传 GBD CSV/TSV 文件。")
+  }
+  sheets <- readxl::excel_sheets(path)
+  pieces <- list()
+  errors <- character(0)
+  for (sheet in sheets) {
+    raw <- try(as.data.frame(readxl::read_excel(path, sheet = sheet, .name_repair = "minimal"), stringsAsFactors = FALSE, check.names = FALSE), silent = TRUE)
+    if (inherits(raw, "try-error") || nrow(raw) == 0) next
+    one <- try(standardize_gbd_data(raw), silent = TRUE)
+    if (inherits(one, "try-error") || nrow(one) == 0) {
+      cond <- attr(one, "condition")
+      msg <- if (is.null(cond)) "无法标准化" else conditionMessage(cond)
+      errors <- c(errors, paste0(sheet, ": ", msg))
+      next
+    }
+    one$source_file <- paste0(basename(name), "::", sheet)
+    one$data_type <- "Excel estimate"
+    pieces[[length(pieces) + 1]] <- one
+  }
+  if (length(pieces) == 0) {
+    msg <- if (length(errors) > 0) paste(errors, collapse = "；") else "没有包含 year/val 的估计表。"
+    stop(paste0("Excel 中未发现可分析的 GBD 结果表：", msg))
+  }
+  out <- do.call(rbind, pieces)
+  rownames(out) <- NULL
+  standardize_gbd_data(out)
+}
+
+infer_gbd_cause_from_file <- function(name) {
+  upper <- toupper(basename(name))
+  if (grepl("NO2|NITROGEN", upper)) return("Nitrogen dioxide pollution")
+  if (grepl("PM2|PM_", upper) || grepl("AIR_POLLUTION.*PM", upper)) return("Particulate matter pollution")
+  if (grepl("BREAST_CANCER", upper)) return("Breast cancer")
+  if (grepl("MENINGITIS", upper)) return("Meningitis")
+  tools::file_path_sans_ext(basename(name))
+}
+
+extract_year_from_name <- function(name) {
+  clean <- gsub("GBD_[0-9]{4}", "", basename(name), ignore.case = TRUE)
+  clean <- gsub("Y[0-9]{4}.*$", "", clean, ignore.case = TRUE)
+  hits <- regmatches(clean, gregexpr("(19|20)[0-9]{2}", clean))[[1]]
+  hits <- as.integer(hits[nzchar(hits)])
+  hits <- hits[hits >= 1950 & hits <= 2050]
+  if (length(hits) == 0) NA_integer_ else hits[[length(hits)]]
+}
+
+read_gbd_tif <- function(path, name = basename(path)) {
+  if (!requireNamespace("terra", quietly = TRUE)) {
+    stop("检测到 GeoTIFF 栅格文件，但本机尚未安装 terra 包。请先安装 terra，或上传 GBD CSV/TSV 表格文件。")
+  }
+  r <- terra::rast(path)
+  stats <- terra::global(r, fun = c("mean", "sd"), na.rm = TRUE)
+  val <- as.numeric(stats[1, "mean"])
+  sdv <- as.numeric(stats[1, "sd"])
+  if (!is.finite(sdv)) sdv <- 0
+  year <- extract_year_from_name(name)
+  if (!is.finite(year)) year <- NA_integer_
+  metric <- if (grepl("NO2|NITROGEN", toupper(name))) "ppb" else "ug/m3"
+  out <- data.frame(
+    measure = "Exposure",
+    location = "Global raster mean",
+    sex = "Both",
+    age = "All Ages",
+    cause = infer_gbd_cause_from_file(name),
+    metric = metric,
+    year = year,
+    val = val,
+    lower = pmax(0, val - sdv),
+    upper = val + sdv,
+    region = "Raster summary",
+    sdi = NA_real_,
+    population = NA_real_,
+    source_file = basename(name),
+    data_type = "GeoTIFF raster summary",
+    stringsAsFactors = FALSE
+  )
+  standardize_gbd_data(out)
 }
 
 read_gbd_files <- function(paths, names = basename(paths)) {
   if (length(paths) == 0) stop("没有可读取的 GBD 文件。")
-  pieces <- lapply(seq_along(paths), function(i) read_gbd_file(paths[[i]], names[[i]]))
+  pieces <- list()
+  errors <- character(0)
+  for (i in seq_along(paths)) {
+    one <- try(read_gbd_file(paths[[i]], names[[i]]), silent = TRUE)
+    if (inherits(one, "try-error")) {
+      errors <- c(errors, paste0(names[[i]], ": ", conditionMessage(attr(one, "condition"))))
+      next
+    }
+    pieces[[length(pieces) + 1]] <- one
+  }
   pieces <- pieces[vapply(pieces, nrow, integer(1)) > 0]
-  if (length(pieces) == 0) stop("上传文件中没有可分析记录。")
+  if (length(pieces) == 0) {
+    detail <- if (length(errors) > 0) paste0(" 失败详情：", paste(head(errors, 6), collapse = "；")) else ""
+    stop(paste0("上传文件中没有可分析记录。", detail))
+  }
   out <- do.call(rbind, pieces)
   rownames(out) <- NULL
-  standardize_gbd_data(out)
+  out <- standardize_gbd_data(out)
+  attr(out, "gbd_import_errors") <- errors
+  out
 }
 
 read_gbd_zip <- function(path, name = basename(path)) {
   listing <- utils::unzip(path, list = TRUE)
   if (!nrow(listing)) stop("ZIP 压缩包为空。")
   files <- listing$Name[!grepl("/$", listing$Name) & is_supported_gbd_file(listing$Name)]
-  if (length(files) == 0) stop("ZIP 中没有 CSV/TSV/TXT 数据文件。")
+  if (length(files) == 0) stop("ZIP 中没有 CSV/TSV/TXT/XLSX/TIF 数据文件。")
   exdir <- tempfile("gbd_zip_")
   dir.create(exdir, recursive = TRUE, showWarnings = FALSE)
   extracted <- utils::unzip(path, files = files, exdir = exdir, junkpaths = FALSE)
@@ -260,7 +390,7 @@ gbd_variable_template <- function() {
 
 gbd_field_summary <- function(data) {
   data <- standardize_gbd_data(data)
-  fields <- c("measure", "cause", "metric", "age", "sex", "location", "region", "source_file")
+  fields <- c("data_type", "measure", "cause", "metric", "age", "sex", "location", "region", "source_file")
   rows <- lapply(fields, function(field) {
     vals <- sort(unique(data[[field]]))
     data.frame(
@@ -413,13 +543,42 @@ default_filter_combo <- function(data) {
       return(as.list(catalog[i, c("measure", "cause", "metric", "age", "sex")]))
     }
   }
-  first <- data[1, , drop = FALSE]
+
+  candidates <- unique(data[c("measure", "metric", "age", "sex")])
+  score_one <- function(row) {
+    hit <- data[
+      data$measure == row$measure &
+        data$metric == row$metric &
+        data$age == row$age &
+        data$sex == row$sex,
+      ,
+      drop = FALSE
+    ]
+    score <- nrow(hit) + 60 * length(unique(hit$location)) + 20 * length(unique(hit$year)) + 10 * length(unique(hit$cause))
+    if (tolower(row$metric) == "rate") score <- score + 800
+    if (tolower(row$age) %in% c("age-standardized", "all ages", "all age")) score <- score + 500
+    if (tolower(row$sex) == "both") score <- score + 350
+    if (tolower(row$measure) %in% c("deaths", "dalys", "incidence", "prevalence", "exposure", "continuous")) score <- score + 200
+    score
+  }
+  scores <- vapply(seq_len(nrow(candidates)), function(i) score_one(candidates[i, , drop = FALSE]), numeric(1))
+  best <- candidates[which.max(scores), , drop = FALSE]
+  best_data <- data[
+    data$measure == best$measure[[1]] &
+      data$metric == best$metric[[1]] &
+      data$age == best$age[[1]] &
+      data$sex == best$sex[[1]],
+    ,
+    drop = FALSE
+  ]
+  causes <- sort(unique(best_data$cause))
+  cause <- if (length(causes) > 1 && length(unique(best_data$source_file)) > 1) "__ALL__" else causes[[1]]
   list(
-    measure = default_selection(data, "measure"),
-    cause = first$cause[[1]],
-    metric = default_selection(data, "metric"),
-    age = default_selection(data, "age"),
-    sex = default_selection(data, "sex")
+    measure = best$measure[[1]],
+    cause = cause,
+    metric = best$metric[[1]],
+    age = best$age[[1]],
+    sex = best$sex[[1]]
   )
 }
 
